@@ -4,16 +4,14 @@ from streamlit_folium import st_folium
 
 # --- 1. CONFIGURATION DE LA PAGE ---
 st.set_page_config(
-    page_title="SLOT 2.0 - Soft Mode", 
-    layout="wide", 
-    initial_sidebar_state="expanded"
+    page_title="SLOT 2.0 - Ultra Clean", 
+    layout="wide"
 )
 
-# Style CSS pour personnaliser l'interface (couleurs douces)
+# Style CSS pour un fond neutre et propre
 st.markdown("""
     <style>
-    .stApp { background-color: #fdfaf5; }
-    .stTextInput > div > div > input { background-color: #ffffff; border-radius: 10px; }
+    .stApp { background-color: #f8f9fa; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -30,15 +28,14 @@ def load_assets():
 model, prepro = load_assets()
 
 # --- 3. INTERFACE UTILISATEUR ---
-st.title("🌿 SLOT 2.0 - Visualisation Douce")
+st.title("⚪ SLOT 2.0 - Carte de Précision")
 
 with st.sidebar:
-    st.header("📍 Zone de Recherche")
-    adresse_saisie = st.text_input("Adresse à Paris :", "Place de la Concorde, Paris")
-    rayon_scan = st.slider("Rayon du scan (mètres)", 100, 1000, 400)
-    
-    st.divider()
-    st.info("Les rues s'affichent en fonction de leur capacité théorique actuelle.")
+    st.header("⚙️ Paramètres")
+    adresse_saisie = st.text_input("Adresse de départ :", "Rue de Rivoli, Paris")
+    rayon_scan = st.slider("Rayon du scan (m)", 100, 1000, 400)
+    st.write("---")
+    st.caption("Mode : Minimaliste (Sans distractions)")
 
 # --- 4. RÉCUPÉRATION DES COORDONNÉES GPS ---
 url_geo = f"https://api-adresse.data.gouv.fr/search/?q={adresse_saisie}&limit=1"
@@ -48,20 +45,20 @@ try:
         coords = res_geo['features'][0]['geometry']['coordinates']
         lon, lat = coords[0], coords[1]
         
-        # --- 5. CRÉATION DE LA CARTE (STYLE SABLE & BLANC) ---
-        # On utilise le fond "HOT" qui est beige/vert d'eau très clair
+        # --- 5. CRÉATION DE LA CARTE (ULTRA-MINIMALISTE) ---
+        # "cartodbpositronnolabels" supprime les noms de lieux, bus, monuments.
         m = folium.Map(
             location=[lat, lon], 
             zoom_start=17, 
-            tiles="https://{s}.tile.openstreetmap.fr/hot/{z}/{x}/{y}.png",
-            attr="© OpenStreetMap contributors"
+            tiles="cartodbpositronnolabels", 
+            attr="CartoDB / OpenStreetMap"
         )
 
         # --- 6. RÉCUPÉRATION DES RUES DANS LE RAYON ---
         url_paris = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/stationnement-sur-voie-publique-emprises/records"
         params = {
             "where": f"distance(geom, geom'POINT({lon} {lat})', {rayon_scan}m)",
-            "limit": 100
+            "limit": 150
         }
         
         res_paris = requests.get(url_paris, params=params).json()
@@ -72,42 +69,37 @@ try:
                 nom_rue = rue.get('nomvoie', 'Voie sans nom')
                 nb_places = rue.get('placal', 0)
                 
-                # On dessine uniquement les lignes (rues)
                 if geom and geom['type'] == 'LineString':
-                    # Conversion des points [lon, lat] vers [lat, lon] pour Folium
                     points_gps = [[p[1], p[0]] for p in geom['coordinates']]
                     
-                    # LOGIQUE VISUELLE TEMPORAIRE (IA à brancher ici)
-                    # Vert si > 5 places, Rouge si < 5
-                    couleur_ligne = "#2ecc71" if nb_places > 5 else "#e74c3c"
-                    largeur_ligne = 6 if nb_places > 5 else 3
+                    # LOGIQUE VISUELLE (Simple Noir & Blanc pour les axes)
+                    # On garde le Vert/Rouge car c'est ton code couleur métier
+                    couleur_ligne = "#27ae60" if nb_places > 5 else "#c0392b"
                     
                     folium.PolyLine(
                         points_gps, 
                         color=couleur_ligne, 
-                        weight=largeur_ligne, 
-                        opacity=0.8,
-                        popup=f"<b>{nom_rue}</b><br>Places : {nb_places}"
+                        weight=5, 
+                        opacity=0.9,
+                        popup=f"{nom_rue} : {nb_places} pl."
                     ).add_to(m)
 
-        # Marqueur central (Position de Louis)
+        # Marqueur Louis (Cercle fin)
         folium.CircleMarker(
             [lat, lon],
-            radius=10,
-            color="#3498db",
+            radius=6,
+            color="#2c3e50",
             fill=True,
-            fill_color="#3498db",
-            fill_opacity=0.6,
-            popup="Centre du Scan"
+            fill_color="#2c3e50",
+            fill_opacity=1,
+            popup="Moi"
         ).add_to(m)
 
-        # --- 7. AFFICHAGE FINAL ---
-        st_folium(m, width=1000, height=600, returned_objects=[])
+        # --- 7. AFFICHAGE ---
+        st_folium(m, width=1200, height=700, returned_objects=[])
         
     else:
-        st.error("Désolé, je ne trouve pas cette adresse à Paris.")
+        st.error("Adresse introuvable.")
 
 except Exception as e:
-    st.error(f"Une erreur est survenue : {e}")
-
-st.caption("Données sources : Open Data Paris | Moteur : SLOT Engine V2")
+    st.error(f"Erreur : {e}")
