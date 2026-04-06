@@ -3,9 +3,21 @@ import requests, folium, joblib, math, pytz, numpy as np, pandas as pd
 from streamlit_folium import st_folium
 from datetime import datetime
 
-# --- 1. CONFIGURATION & ASSETS ---
-st.set_page_config(page_title="SLOT 2.0 - Scanner Dynamique", layout="wide")
+# --- 1. CONFIGURATION DE LA PAGE ---
+st.set_page_config(
+    page_title="SLOT 2.0 - Traçage Haute Précision", 
+    layout="wide"
+)
 
+# Style pour épurer l'interface mobile
+st.markdown("""
+    <style>
+    .stApp { background-color: #ffffff; }
+    [data-testid="stHeader"] {background: rgba(0,0,0,0);}
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- 2. CHARGEMENT DES ASSETS & DATA ---
 DATA_ARRDT = {
     1: {"REV_M": 2916, "VEH": 0.32}, 2: {"REV_M": 2666, "VEH": 0.28}, 3: {"REV_M": 2833, "VEH": 0.25},
     4: {"REV_M": 2750, "VEH": 0.26}, 5: {"REV_M": 3166, "VEH": 0.35}, 6: {"REV_M": 3750, "VEH": 0.38},
@@ -24,22 +36,24 @@ JOURS_FR = {
 @st.cache_resource
 def load_assets():
     try:
-        return joblib.load("modele_lightgbmDA.pkl"), joblib.load("preprocessorDA.pkl")
+        model = joblib.load("modele_lightgbmDA.pkl")
+        prepro = joblib.load("preprocessorDA.pkl")
+        return model, prepro
     except:
         return None, None
 
 model, prepro = load_assets()
 
-# --- 2. FONCTIONS DE CALCUL ---
+# --- 3. FONCTIONS DE CALCUL ---
 def get_weather(lat, lon):
     try:
         r = requests.get(f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,weather_code").json()
         c = r['current']['weather_code']
-        m = "Beau" if c in [0,1] else ("Nuageux" if c in [2,3,45,48] else "Pluie")
+        m = "Beau" if c in [0,1] else "Nuageux"
         return m, r['current']['temperature_2m']
     except: return "Beau", 18.0
 
-def predire_rue_ia(nom_rue, nb_total, arrdt, mto, temp):
+def predire_dispo_ia(nom_rue, nb_total, arrdt, mto, temp):
     if not model or not prepro: return 0
     now = datetime.now(pytz.timezone('Europe/Paris'))
     minutes = now.hour * 60 + now.minute
@@ -69,86 +83,91 @@ def predire_rue_ia(nom_rue, nb_total, arrdt, mto, temp):
         return max(0, math.floor(nb_total * (1 - occ)))
     except: return 0
 
-# --- 3. INTERFACE DE SAISIE ---
-st.title("🛰️ SLOT 2.0 - Radar Terrain")
+# --- 4. INTERFACE DE SAISIE ---
+st.title("🛰️ SLOT 2.0 - Radar Intelligent")
 
 c1, c2, c3 = st.columns([1, 2, 4])
 with c1: num_v = st.text_input("N°", "11")
-with c2: type_v = st.selectbox("Type", ["Rue", "Boulevard", "Avenue", "Place", "Quai", "Voie"])
+with c2: type_v = st.selectbox("Type", ["Rue", "Boulevard", "Avenue", "Place", "Quai", "Impasse", "Square"])
 with c3: nom_v = st.text_input("Nom de la voie", placeholder="ex: Voltaire")
 
-with st.sidebar:
-    st.header("⚙️ Réglages")
-    rayon_scan = st.slider("Rayon du radar (m)", 100, 1000, 400)
-    taille_logo = st.slider("Taille icône SLOT", 30, 100, 60)
-    st.write("---")
-    st.caption("Données : Open Data Paris (V2.1)")
-
-# --- 4. LOGIQUE DE LOCALISATION ---
-lat_v, lon_v, zoom_v = 48.8566, 2.3522, 12
+# --- 5. ANALYSE ET GÉOMÉTRIE ---
+lat_map, lon_map, zoom_map = 48.8566, 2.3522, 12
 target_found = False
-arrdt = 1
+points_rue = []
+total_p = 0
+arrdt_final = 1
+mto_final, temp_final = "Beau", 18.0
 
 if nom_v:
-    adresse = f"{num_v} {type_v} {nom_v}, Paris"
-    geo_res = requests.get(f"https://api-adresse.data.gouv.fr/search/?q={adresse}&limit=1").json()
-    if geo_res['features']:
-        lon_v, lat_v = geo_res['features'][0]['geometry']['coordinates']
-        arrdt_str = geo_res['features'][0]['properties']['postcode'][-2:]
-        arrdt = int(arrdt_str)
-        mto, temp = get_weather(lat_v, lon_v)
-        zoom_v, target_found = 18, True
-
-# Création de la carte
-m = folium.Map(location=[lat_v, lon_v], zoom_start=zoom_v, tiles="cartodbpositron")
-
-# --- 5. RÉCUPÉRATION DYNAMIQUE DES SEGMENTS ---
-if target_found:
-    # On cherche TOUT dans un rayon autour du point GPS (on ignore les numéros de rue ici)
-    url_p = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/stationnement-sur-voie-publique-emprises/records"
-    params = {
-        "where": f"within_distance(geom, geom'POINT({lon_v} {lat_v})', {rayon_scan}m)",
-        "limit": 100
-    }
+    # A. Géocodage de la position de Louis
+    adresse_q = f"{num_v} {type_v} {nom_v} Paris"
+    geo = requests.get(f"https://api-adresse.data.gouv.fr/search/?q={adresse_q}&limit=1").json()
     
-    try:
-        res_p = requests.get(url_p, params=params).json()
-        segments = res_p.get('results', [])
+    if geo['features']:
+        f_geo = geo['features'][0]
+        lon_map, lat_map = f_geo['geometry']['coordinates']
+        arrdt_final = int(f_geo['properties']['postcode'][-2:])
+        mto_final, temp_final = get_weather(lat_map, lon_map)
+        zoom_map = 17
+        target_found = True
+
+        # B. Récupération de TOUS les segments de la rue (Somme des places)
+        url_p = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/stationnement-sur-voie-publique-emprises/records"
+        nom_clean = nom_v.upper()
+        params = {"where": f"suggest(nomvoie, '{nom_clean}') AND arrond = {arrdt_final}", "limit": 100}
         
-        if segments:
-            for rue in segments:
-                geom = rue.get('geom', {}).get('geometry', {})
-                nom_r = rue.get('nomvoie', 'Inconnu')
-                nb_t = rue.get('placal', 0)
-                
-                if geom and geom['type'] == 'LineString':
-                    pts = [[p[1], p[0]] for p in geom['coordinates']]
-                    
-                    # --- IA PRÉDICTION ---
-                    libres = predire_rue_ia(nom_r, nb_t, arrdt, mto, temp)
-                    
-                    # --- LOGIQUE COULEUR DEMANDÉE ---
-                    if libres <= 1: couleur = "#e74c3c"   # ROUGE (0-1 place)
-                    elif 1 < libres <= 3: couleur = "#f39c12" # ORANGE (2-3 places)
-                    else: couleur = "#27ae60"             # VERT (> 3 places)
-                    
-                    folium.PolyLine(
-                        pts, color=couleur, weight=8, opacity=0.8,
-                        popup=f"<b>{nom_r}</b><br>Prédit : {libres} places libres"
-                    ).add_to(m)
-        else:
-            st.warning("📡 Radar : Aucun segment de stationnement détecté dans cette zone.")
+        try:
+            res_p = requests.get(url_p, params=params).json()
+            if 'results' in res_p:
+                for r in res_p['results']:
+                    reg = str(r.get('regpri', '')).upper()
+                    # Filtre strict sur les types de places demandés
+                    if any(x in reg for x in ["PAYANT ROTATIF", "PAYANT MIXTE", "GRATUIT"]):
+                        total_p += r.get('placal', 0)
+                        geom = r.get('geom', {}).get('geometry', {})
+                        if geom and geom['type'] == 'LineString':
+                            points_rue.extend([[p[1], p[0]] for p in geom['coordinates']])
+        except: pass
 
-    except Exception as e:
-        st.error(f"Erreur technique radar : {e}")
+# --- 6. CONSTRUCTION DE LA CARTE ---
+m = folium.Map(location=[lat_map, lon_map], zoom_start=zoom_map, tiles="cartodbpositron")
 
-    # LOGO SLOT SUR TA POSITION
-    URL_LOGO = "https://raw.githubusercontent.com/maximedefay69-code/SLOT---2.0/refs/heads/main/SLOT_img.png"
-    try:
-        logo = folium.CustomIcon(URL_LOGO, icon_size=(taille_logo, taille_logo))
-        folium.Marker([lat_v, lon_v], icon=logo, popup="Cible").add_to(m)
-    except:
-        folium.Marker([lat_v, lon_v]).add_to(m)
+# Si on a trouvé des segments de rue
+if points_rue and total_p > 0:
+    # Trouver les extrémités (Sud et Nord)
+    points_rue.sort(key=lambda x: x[0]) 
+    point_A = points_rue[0]
+    point_B = points_rue[-1]
 
-# --- 6. AFFICHAGE ---
-st_folium(m, width=1200, height=750, key="slot_v81", returned_objects=[])
+    # Prédiction IA
+    libres = predire_dispo_ia(nom_v, total_p, arrdt_final, mto_final, temp_final)
+    
+    # Couleur IA
+    if libres <= 1: coul = "#e74c3c"   # ROUGE
+    elif 1 < libres <= 3: coul = "#f39c12" # ORANGE
+    else: coul = "#27ae60"             # VERT
+
+    # TRACER LA LIGNE MAITRESSE (Directe entre les deux points les plus éloignés)
+    folium.PolyLine(
+        [point_A, point_B], 
+        color=coul, 
+        weight=12, 
+        opacity=0.9, 
+        popup=f"AXE {nom_v.upper()} : {total_p} pl. / IA : {libres} libres"
+    ).add_to(m)
+
+# LOGO SLOT SUR LA POSITION EXACTE
+URL_LOGO = "https://raw.githubusercontent.com/maximedefay69-code/SLOT---2.0/refs/heads/main/SLOT_img.png"
+logo_icon = folium.CustomIcon(URL_LOGO, icon_size=(60, 60))
+folium.Marker([lat_map, lon_map], icon=logo_icon, popup="Moi").add_to(m)
+
+# --- 7. RENDU ---
+st_folium(m, width=1200, height=750, key="slot_v82")
+
+if target_found:
+    st.write(f"📊 **Analyse de la {type_v} {nom_v}** : {total_p} places éligibles détectées.")
+    if total_p == 0:
+        st.warning("⚠️ Aucune place Payant/Gratuit détectée sur cette voie via l'API.")
+else:
+    st.info("💡 Saisissez une adresse pour lancer le radar prédictif.")
