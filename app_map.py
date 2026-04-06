@@ -4,9 +4,9 @@ from streamlit_folium import st_folium
 from datetime import datetime
 
 # --- 1. CONFIGURATION ---
-st.set_page_config(page_title="SLOT 2.0 - Radar Final V94", layout="wide")
+st.set_page_config(page_title="SLOT 2.0 - V95 Master", layout="wide")
 
-# Données Socio-économiques (Features IA)
+# Données Socio-économiques par Arrondissement (Features IA)
 DATA_ARRDT = {
     1: {"REV_M": 2916, "VEH": 0.32}, 2: {"REV_M": 2666, "VEH": 0.28}, 3: {"REV_M": 2833, "VEH": 0.25},
     4: {"REV_M": 2750, "VEH": 0.26}, 5: {"REV_M": 3166, "VEH": 0.35}, 6: {"REV_M": 3750, "VEH": 0.38},
@@ -74,14 +74,14 @@ def predire_dispo_ia(nom_rue, nb_total, arrdt, mto, temp):
     except: return 0
 
 # --- 3. INTERFACE ---
-st.title("🛰️ SLOT 2.0 - Vecteur Haute Précision")
+st.title("🛰️ SLOT 2.0 - Radar Master V95")
 
 c1, c2, c3 = st.columns([1, 2, 4])
 with c1: num_v = st.number_input("N°", value=11)
 with c2: type_v = st.selectbox("Type", ["Rue", "Boulevard", "Avenue", "Place", "Quai"])
 with c3: nom_v = st.text_input("Nom de la voie", value="Voltaire")
 
-# --- 4. LOGIQUE GÉOGRAPHIQUE ET FILTRES ---
+# --- 4. LOGIQUE GÉOGRAPHIQUE (EXTRACTEUR UNIVERSEL) ---
 lat_piv, lon_piv = 48.8566, 2.3522
 pt_MIN, pt_MAX = None, None
 total_p, libres = 0, 0
@@ -105,55 +105,56 @@ if nom_v:
             if 'results' in res_p and len(res_p['results']) > 0:
                 df = pd.DataFrame(res_p['results'])
                 
-                # CIBLAGE DYNAMIQUE DES COLONNES (nummin ou num_min)
+                # Identification des colonnes
                 c_min = next((c for c in ['nummin', 'num_min'] if c in df.columns), None)
                 c_max = next((c for c in ['nummax', 'num_max'] if c in df.columns), None)
                 c_reg = next((c for c in ['regpri', 'regime'] if c in df.columns), None)
 
                 if c_reg:
-                    # Filtre des places Payant/Gratuit
                     mask = df[c_reg].str.upper().str.contains("PAYANT|GRATUIT", na=False)
                     df_f = df[mask].copy()
                     total_p = df_f['placal'].sum()
-                    
-                    # C. CALCUL IA DYNAMIQUE
                     libres = predire_dispo_ia(nom_v, total_p, arrdt, mto, temp)
+
+                    # FONCTION D'EXTRACTION GPS TOUT-TERRAIN
+                    def get_coords(record):
+                        if 'geo_point_2d' in record and isinstance(record['geo_point_2d'], dict):
+                            return [record['geo_point_2d']['lat'], record['geo_point_2d']['lon']]
+                        if 'geom' in record and 'geometry' in record['geom']:
+                            g = record['geom']['geometry']
+                            if g['type'] == 'LineString':
+                                return [g['coordinates'][0][1], g['coordinates'][0][0]]
+                            elif g['type'] == 'MultiLineString':
+                                return [g['coordinates'][0][0][1], g['coordinates'][0][0][0]]
+                        return None
 
                     if not df_f.empty and c_min and c_max:
                         df_f[c_min] = pd.to_numeric(df_f[c_min], errors='coerce')
                         df_f[c_max] = pd.to_numeric(df_f[c_max], errors='coerce')
                         
-                        # Extraction du point GPS du Minimum et du Maximum
                         row_start = df_f.loc[df_f[c_min].idxmin()]
                         row_end = df_f.loc[df_f[c_max].idxmax()]
                         
-                        if 'geo_point_2d' in row_start:
-                            pt_MIN = [row_start['geo_point_2d']['lat'], row_start['geo_point_2d']['lon']]
-                        if 'geo_point_2d' in row_end:
-                            pt_MAX = [row_end['geo_point_2d']['lat'], row_end['geo_point_2d']['lon']]
-        except: pass
+                        pt_MIN = get_coords(row_start)
+                        pt_MAX = get_coords(row_end)
+        except Exception as e:
+            st.error(f"Erreur technique : {e}")
 
 # --- 5. RENDU CARTE ---
 m = folium.Map(location=[lat_piv, lon_piv], zoom_start=18, tiles="cartodbpositron")
 
 if target_found:
-    # Code Couleur IA
     coul = "#e74c3c" if libres <= 1 else ("#f39c12" if libres <= 3 else "#27ae60")
     
-    # Tracé Segment 1 : Borne Min -> Pivot
     if pt_MIN:
         folium.PolyLine([pt_MIN, [lat_piv, lon_piv]], color=coul, weight=12, opacity=0.8).add_to(m)
-    
-    # Tracé Segment 2 : Pivot -> Borne Max
     if pt_MAX:
         folium.PolyLine([[lat_piv, lon_piv], pt_MAX], color=coul, weight=12, opacity=0.8).add_to(m)
 
-# LOGO
 URL_LOGO = "https://raw.githubusercontent.com/maximedefay69-code/SLOT---2.0/refs/heads/main/SLOT_img.png"
 folium.Marker([lat_piv, lon_piv], icon=folium.CustomIcon(URL_LOGO, icon_size=(60, 60))).add_to(m)
 
-# AFFICHAGE FINAL
-st_folium(m, width=1200, height=750, key="v94_final")
+st_folium(m, width=1200, height=750, key="v95_master")
 if target_found:
-    st.info(f"📊 Rue {nom_v.upper()} ({arrdt}e) : {total_p} places détectées.")
+    st.info(f"📊 {nom_v.upper()} | {total_p} places | 🌡️ {temp}°C | 🌦️ {mto}")
     st.success(f"🤖 IA SLOT : **{libres} places libres** estimées à {datetime.now(pytz.timezone('Europe/Paris')).strftime('%H:%M')}.")
