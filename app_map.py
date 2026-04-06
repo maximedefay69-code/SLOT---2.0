@@ -3,21 +3,10 @@ import requests, folium, joblib, math, pytz, numpy as np, pandas as pd
 from streamlit_folium import st_folium
 from datetime import datetime
 
-# --- 1. CONFIGURATION DE LA PAGE ---
-st.set_page_config(
-    page_title="SLOT 2.0 - Expert Radar", 
-    layout="wide"
-)
+# --- 1. CONFIGURATION ---
+st.set_page_config(page_title="SLOT 2.0 - IA Real-Time", layout="wide")
 
-# Style CSS pour mobile-first
-st.markdown("""
-    <style>
-    .stApp { background-color: #ffffff; }
-    [data-testid="stHeader"] {background: rgba(0,0,0,0);}
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- 2. DONNÉES ET ASSETS ---
+# Données Socio-économiques par Arrondissement
 DATA_ARRDT = {
     1: {"REV_M": 2916, "VEH": 0.32}, 2: {"REV_M": 2666, "VEH": 0.28}, 3: {"REV_M": 2833, "VEH": 0.25},
     4: {"REV_M": 2750, "VEH": 0.26}, 5: {"REV_M": 3166, "VEH": 0.35}, 6: {"REV_M": 3750, "VEH": 0.38},
@@ -36,35 +25,20 @@ JOURS_FR = {
 @st.cache_resource
 def load_assets():
     try:
-        model = joblib.load("modele_lightgbmDA.pkl")
-        prepro = joblib.load("preprocessorDA.pkl")
-        return model, prepro
-    except:
-        return None, None
+        m = joblib.load("modele_lightgbmDA.pkl")
+        p = joblib.load("preprocessorDA.pkl")
+        return m, p
+    except: return None, None
 
 model, prepro = load_assets()
 
-# --- 3. FONCTIONS TECHNIQUES ---
-def formater_type_voie(type_v):
-    """Mappe le choix utilisateur vers les codes de l'API Paris"""
-    mapping = {
-        "Boulevard": "BD",
-        "Avenue": "AV",
-        "Rue": "RUE",
-        "Place": "PCE",
-        "Quai": "QUAI",
-        "Impasse": "IMP",
-        "Allée": "ALL",
-        "Square": "SQ"
-    }
-    return mapping.get(type_v, "RUE")
-
+# --- 2. FONCTIONS DE CALCUL ---
 def get_weather(lat, lon):
     try:
         r = requests.get(f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,weather_code").json()
         c = r['current']['weather_code']
-        m = "Beau" if c in [0,1] else "Nuageux"
-        return m, r['current']['temperature_2m']
+        mto = "Beau" if c in [0,1] else ("Nuageux" if c in [2,3,45,48] else "Pluie")
+        return mto, r['current']['temperature_2m']
     except: return "Beau", 18.0
 
 def predire_dispo_ia(nom_rue, nb_total, arrdt, mto, temp):
@@ -97,97 +71,87 @@ def predire_dispo_ia(nom_rue, nb_total, arrdt, mto, temp):
         return max(0, math.floor(nb_total * (1 - occ)))
     except: return 0
 
-# --- 4. INTERFACE ---
-st.title("🛰️ SLOT 2.0 - Radar de Précision")
+# --- 3. INTERFACE ---
+st.title("🛰️ SLOT 2.0 - Radar IA Final")
 
 c1, c2, c3 = st.columns([1, 2, 4])
-with c1: num_v = st.text_input("N°", "11")
-with c2: type_v = st.selectbox("Type", ["Rue", "Boulevard", "Avenue", "Place", "Quai", "Impasse", "Square"])
-with c3: nom_v = st.text_input("Nom de la voie", placeholder="ex: Voltaire")
+with c1: num_v = st.number_input("N°", value=11, step=1)
+with c2: type_v = st.selectbox("Type", ["Rue", "Boulevard", "Avenue", "Place"])
+with c3: nom_v = st.text_input("Nom de la voie", value="Voltaire")
 
-# --- 5. LOGIQUE DE CALCUL ET GÉOMÉTRIE ---
-lat_map, lon_map, zoom_map = 48.8566, 2.3522, 12
-target_found = False
-pts_rue = []
+# --- 4. LOGIQUE DE CALCUL ET GÉOMÉTRIE ---
+lat_pivot, lon_pivot = 48.8566, 2.3522
+pt_A, pt_C = None, None
 total_p = 0
-arrdt_final = 1
-mto_final, temp_final = "Beau", 18.0
+target_found = False
 
 if nom_v:
-    # A. Localisation précise du point de recherche (Logo)
-    adresse_full = f"{num_v} {type_v} {nom_v} Paris"
-    geo = requests.get(f"https://api-adresse.data.gouv.fr/search/?q={adresse_full}&limit=1").json()
-    
-    if geo['features']:
-        f_geo = geo['features'][0]
-        lon_map, lat_map = f_geo['geometry']['coordinates']
-        arrdt_final = int(f_geo['properties']['postcode'][-2:])
-        mto_final, temp_final = get_weather(lat_map, lon_map)
-        zoom_map, target_found = 17, True
+    # A. POINT B (PIVOT LOGO)
+    geo_pivot = requests.get(f"https://api-adresse.data.gouv.fr/search/?q={num_v}+{type_v}+{nom_v}+Paris&limit=1").json()
+    if geo_pivot['features']:
+        lon_pivot, lat_pivot = geo_pivot['features'][0]['geometry']['coordinates']
+        arrdt = int(geo_pivot['features'][0]['properties']['postcode'][-2:])
+        mto, temp = get_weather(lat_pivot, lon_pivot)
+        target_found = True
 
-        # B. Requête API Paris avec Filtre de Type de Voie
-        type_api = formater_type_voie(type_v)
+        # B. COLLECTE DES DONNÉES RUE (API PARIS)
         nom_api = nom_v.upper()
+        type_api = "BD" if type_v == "Boulevard" else ("AV" if type_v == "Avenue" else "RUE")
         
         url_p = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/stationnement-sur-voie-publique-emprises/records"
-        # Filtre SQL strict : Nom exact ET Type exact
         params = {
-            "where": f"nomvoie LIKE '{nom_api}' AND typevoie LIKE '{type_api}' AND arrond = {arrdt_final}",
+            "where": f"nomvoie LIKE '{nom_api}' AND typevoie LIKE '{type_api}' AND arrond = {arrdt}",
             "limit": 100
         }
         
-        try:
-            res_p = requests.get(url_p, params=params).json()
-            if 'results' in res_p:
-                for r in res_p['results']:
-                    reg = str(r.get('regpri', '')).upper()
-                    if any(x in reg for x in ["PAYANT ROTATIF", "PAYANT MIXTE", "GRATUIT"]):
-                        total_p += r.get('placal', 0)
-                        geom = r.get('geom', {}).get('geometry', {})
-                        if geom and geom['type'] == 'LineString':
-                            # Extraction de tous les points GPS pour tracer la ligne
-                            pts_rue.extend([[p[1], p[0]] for p in geom['coordinates']])
-        except: pass
+        res_p = requests.get(url_p, params=params).json()
+        if 'results' in res_p and len(res_p['results']) > 0:
+            df = pd.DataFrame(res_p['results'])
+            
+            # 1. Somme des places (Filtre Payant/Gratuit)
+            mask = df['regpri'].str.upper().str.contains("PAYANT ROTATIF|PAYANT MIXTE|GRATUIT", na=False)
+            df_filtered = df[mask]
+            total_p = df_filtered['placal'].sum()
+            
+            if not df_filtered.empty:
+                # 2. Identification des bornes A (Min) et C (Max)
+                idx_min = df_filtered['nummin'].idxmin()
+                idx_max = df_filtered['nummax'].idxmax()
+                
+                def extract_latlon(record):
+                    g = record.get('geom', {}).get('geometry', {})
+                    if g and 'coordinates' in g:
+                        pts = g['coordinates']
+                        # Retourne [Lat, Lon] - Inversion faite ici
+                        return [pts[0][1], pts[0][0]] if g['type'] == 'LineString' else [pts[0][0][1], pts[0][0][0]]
+                    return None
 
-# --- 6. CONSTRUCTION DE LA CARTE ---
-m = folium.Map(location=[lat_map, lon_map], zoom_start=zoom_map, tiles="cartodbpositron")
+                pt_A = extract_latlon(df_filtered.loc[idx_min])
+                pt_C = extract_latlon(df_filtered.loc[idx_max])
 
-# Affichage de la ligne de rue colorée par l'IA
-if pts_rue and total_p > 0:
-    # On trie les points par latitude pour définir les extrémités Sud/Nord
-    pts_rue.sort(key=lambda x: x[0])
-    start_point = pts_rue[0]
-    end_point = pts_rue[-1]
+# --- 5. PRÉDICTION ET CARTE ---
+m = folium.Map(location=[lat_pivot, lon_pivot], zoom_start=17, tiles="cartodbpositron")
 
-    # Calcul IA
-    libres = predire_dispo_ia(nom_v, total_p, arrdt_final, mto_final, temp_final)
+if target_found and total_p > 0:
+    # IA Prediction réelle
+    libres = predire_dispo_ia(nom_v, total_p, arrdt, mto, temp)
     
-    # Code couleur Louis
+    # Code Couleur
     if libres <= 1: coul = "#e74c3c"   # Rouge
     elif 1 < libres <= 3: coul = "#f39c12" # Orange
     else: coul = "#27ae60"             # Vert
 
-    # Tracé de la ligne maîtresse ultra-visible
-    folium.PolyLine(
-        [start_point, end_point], 
-        color=coul, 
-        weight=15, 
-        opacity=0.85, 
-        popup=f"<b>{type_v} {nom_v.upper()}</b><br>Places : {total_p} | IA : {libres} libres"
-    ).add_to(m)
+    # Tracé des segments avec pivot
+    if pt_A:
+        folium.PolyLine([pt_A, [lat_pivot, lon_pivot]], color=coul, weight=12, opacity=0.8, popup=f"Début -> {num_v}").add_to(m)
+    if pt_C:
+        folium.PolyLine([[lat_pivot, lon_pivot], pt_C], color=coul, weight=12, opacity=0.8, popup=f"{num_v} -> Fin").add_to(m)
 
-# Ajout du logo SLOT
+# Logo
 URL_LOGO = "https://raw.githubusercontent.com/maximedefay69-code/SLOT---2.0/refs/heads/main/SLOT_img.png"
-folium.Marker(
-    [lat_map, lon_map], 
-    icon=folium.CustomIcon(URL_LOGO, icon_size=(60, 60)),
-    popup="Ma cible"
-).add_to(m)
+folium.Marker([lat_pivot, lon_pivot], icon=folium.CustomIcon(URL_LOGO, icon_size=(60,60))).add_to(m)
 
-# --- 7. RENDU FINAL ---
-st_folium(m, width=1200, height=750, key="slot_v83")
-
+# Affichage
+st_folium(m, width=1200, height=750, key="slot_v85_final")
 if target_found:
-    st.success(f"📍 Analyse active : **{type_v.upper()} {nom_v.upper()}** ({total_p} places)")
-else:
-    st.info("👋 Bonjour Louis ! Entre une adresse pour démarrer le scan.")
+    st.info(f"📊 {total_p} places analysées | 🤖 IA : ~{libres} places libres actuellement.")
