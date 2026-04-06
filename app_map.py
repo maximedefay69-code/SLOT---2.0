@@ -4,14 +4,14 @@ from streamlit_folium import st_folium
 
 # --- 1. CONFIGURATION DE LA PAGE ---
 st.set_page_config(
-    page_title="SLOT 2.0 - Ultra Clean", 
+    page_title="SLOT 2.0 - Equilibre", 
     layout="wide"
 )
 
-# Style CSS pour un fond neutre et propre
+# Style CSS minimaliste
 st.markdown("""
     <style>
-    .stApp { background-color: #f8f9fa; }
+    .stApp { background-color: #ffffff; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -28,16 +28,16 @@ def load_assets():
 model, prepro = load_assets()
 
 # --- 3. INTERFACE UTILISATEUR ---
-st.title("⚪ SLOT 2.0 - Carte de Précision")
+st.title("📍 SLOT 2.0 - Navigation Terrain")
 
 with st.sidebar:
-    st.header("⚙️ Paramètres")
-    adresse_saisie = st.text_input("Adresse de départ :", "Rue de Rivoli, Paris")
-    rayon_scan = st.slider("Rayon du scan (m)", 100, 1000, 400)
+    st.header("⚙️ Contrôles")
+    adresse_saisie = st.text_input("Localisation :", "Place de la République, Paris")
+    rayon_scan = st.slider("Rayon du scan (m)", 100, 1000, 500)
     st.write("---")
-    st.caption("Mode : Minimaliste (Sans distractions)")
+    st.caption("Fond de carte : Gris urbain (avec noms)")
 
-# --- 4. RÉCUPÉRATION DES COORDONNÉES GPS ---
+# --- 4. GÉOLOCALISATION ---
 url_geo = f"https://api-adresse.data.gouv.fr/search/?q={adresse_saisie}&limit=1"
 try:
     res_geo = requests.get(url_geo).json()
@@ -45,16 +45,16 @@ try:
         coords = res_geo['features'][0]['geometry']['coordinates']
         lon, lat = coords[0], coords[1]
         
-        # --- 5. CRÉATION DE LA CARTE (ULTRA-MINIMALISTE) ---
-        # "cartodbpositronnolabels" supprime les noms de lieux, bus, monuments.
+        # --- 5. CRÉATION DE LA CARTE (LE JUSTE MILIEU) ---
+        # "cartodbpositron" affiche les noms des rues/communes en mode discret
         m = folium.Map(
             location=[lat, lon], 
             zoom_start=17, 
-            tiles="cartodbpositronnolabels", 
+            tiles="cartodbpositron", 
             attr="CartoDB / OpenStreetMap"
         )
 
-        # --- 6. RÉCUPÉRATION DES RUES DANS LE RAYON ---
+        # --- 6. RÉCUPÉRATION DES RUES ---
         url_paris = "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/stationnement-sur-voie-publique-emprises/records"
         params = {
             "where": f"distance(geom, geom'POINT({lon} {lat})', {rayon_scan}m)",
@@ -72,25 +72,25 @@ try:
                 if geom and geom['type'] == 'LineString':
                     points_gps = [[p[1], p[0]] for p in geom['coordinates']]
                     
-                    # LOGIQUE VISUELLE (Simple Noir & Blanc pour les axes)
-                    # On garde le Vert/Rouge car c'est ton code couleur métier
-                    couleur_ligne = "#27ae60" if nb_places > 5 else "#c0392b"
+                    # Logique couleur : Vert (Libre) / Rouge (Occupé)
+                    # Note : On force l'épaisseur pour que ça dépasse bien du fond de carte
+                    couleur_ligne = "#27ae60" if nb_places > 5 else "#e74c3c"
                     
                     folium.PolyLine(
                         points_gps, 
                         color=couleur_ligne, 
-                        weight=5, 
-                        opacity=0.9,
-                        popup=f"{nom_rue} : {nb_places} pl."
+                        weight=7, 
+                        opacity=0.85,
+                        popup=f"<b>{nom_rue}</b><br>{nb_places} places théoriques"
                     ).add_to(m)
 
-        # Marqueur Louis (Cercle fin)
+        # Marqueur Louis (Cercle bleu électrique pour bien se voir)
         folium.CircleMarker(
             [lat, lon],
-            radius=6,
-            color="#2c3e50",
+            radius=8,
+            color="#007AFF",
             fill=True,
-            fill_color="#2c3e50",
+            fill_color="#007AFF",
             fill_opacity=1,
             popup="Moi"
         ).add_to(m)
@@ -103,3 +103,5 @@ try:
 
 except Exception as e:
     st.error(f"Erreur : {e}")
+
+st.caption("Moteur SLOT V2 - Prêt pour l'intégration IA")
