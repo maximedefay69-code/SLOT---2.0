@@ -9,5 +9,5 @@ scikit-learn==1.5.2
 streamlit-js-eval
 gspread
 google-auth
-requests
-pytz
+folium
+streamlit-folium
