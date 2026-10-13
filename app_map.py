@@ -124,13 +124,20 @@ if nom_v:
                 points_apres = df_rue[df_rue['num'] >= num_v][['lat', 'lon']].values.tolist()
 
 # --- 5. CARTE ---
+STADIA_KEY = st.secrets["STADIA_MAPS_API_KEY"]
+
 m = folium.Map(
     location=[lat_pivot, lon_pivot],
     zoom_start=18,
-    tiles="https://tiles.stadiamaps.com/tiles/alidade_smooth/{z}/{x}/{y}.png",
+    tiles=(
+        "https://tiles.stadiamaps.com/tiles/"
+        "alidade_smooth/{z}/{x}/{y}.png"
+        f"?api_key={STADIA_KEY}"
+    ),
     attr='&copy; Stadia Maps &copy; OpenMapTiles &copy; OpenStreetMap',
     max_zoom=20
 )
+
 if target_found:
     # Code Couleur IA
     coul = "#e74c3c" if libres <= 1 else ("#f39c12" if libres <= 3 else "#27ae60")
