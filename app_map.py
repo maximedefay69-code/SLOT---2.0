@@ -124,7 +124,7 @@ if nom_v:
                 points_apres = df_rue[df_rue['num'] >= num_v][['lat', 'lon']].values.tolist()
 
 # --- 5. CARTE ---
-m = folium.Map(location=[lat_pivot, lon_pivot], zoom_start=18, tiles="cartodbpositron")
+m = folium.Map(location=[lat_pivot, lon_pivot], zoom_start=18, tiles="OpenStreetMap")
 
 if target_found:
     # Code Couleur IA
