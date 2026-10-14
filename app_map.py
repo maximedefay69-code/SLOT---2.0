@@ -53,83 +53,99 @@ def normaliser_nom_rue(nom):
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def obtenir_geometrie_rue(lat, lon, nom_rue):
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def obtenir_geometrie_rue(lat, lon, nom_rue, type_rue="Rue"):
     """
-    Récupère le tracé réel de la rue depuis OpenStreetMap.
-    Recherche autour de l'adresse, puis conserve les tronçons
-    portant le nom de la rue recherchée.
+    Récupère la géométrie réelle de la rue autour de l'adresse.
+    Recherche locale, noms normalisés et cache pour accélérer
+    les recherches suivantes.
     """
     try:
-        # On prend une zone suffisamment large pour retrouver
-        # le tracé complet d'une rue longue.
+        # Recherche limitée à une zone locale de 800 m.
         G = ox.graph.graph_from_point(
             (lat, lon),
-            dist=5000,
+            dist=800,
             dist_type="bbox",
             network_type="drive",
-            simplify=True
+            simplify=True,
+            retain_all=True
         )
 
         _, edges = ox.convert.graph_to_gdfs(G)
 
-        nom_recherche = normaliser_nom_rue(nom_rue)
-
-        # Certaines rues OSM peuvent avoir plusieurs noms.
-        def correspond_au_nom(nom_osm):
-            if isinstance(nom_osm, list):
-                noms = nom_osm
-            else:
-                noms = [nom_osm]
-
-            return any(
-                normaliser_nom_rue(n) == nom_recherche
-                for n in noms
-                if n
+        def normaliser(nom):
+            nom = str(nom).strip().lower()
+            nom = unicodedata.normalize("NFKD", nom)
+            nom = "".join(
+                c for c in nom
+                if not unicodedata.combining(c)
             )
+            return " ".join(nom.split())
 
-        rues = edges[
-            edges["name"].apply(correspond_au_nom)
-        ].copy()
+        recherche = normaliser(f"{type_rue} {nom_rue}")
 
-        if rues.empty:
+        # On accepte le nom avec ou sans son type de voie.
+        variantes = {
+            recherche,
+            normaliser(nom_rue),
+        }
+
+        def correspond(nom_osm):
+            noms = nom_osm if isinstance(nom_osm, list) else [nom_osm]
+
+            for nom in noms:
+                if not nom:
+                    continue
+
+                nom_norm = normaliser(nom)
+
+                if nom_norm in variantes:
+                    return True
+
+                # Tolère notamment le type de voie absent dans OSM.
+                for variante in variantes:
+                    if (
+                        nom_norm.endswith(variante)
+                        or variante.endswith(nom_norm)
+                    ):
+                        return True
+
+            return False
+
+        if "name" not in edges.columns:
             return []
 
-        # Les rues à double sens peuvent être présentes deux fois.
-        # On déduplique les géométries pour éviter de les dessiner
-        # plusieurs fois.
+        rues = edges[edges["name"].apply(correspond)]
+
         geometries = []
-        geometries_vues = set()
 
         for geom in rues.geometry:
             if geom is None or geom.is_empty:
                 continue
 
-            signature = geom.wkb
-            if signature in geometries_vues:
-                continue
+            lignes = (
+                list(geom.geoms)
+                if geom.geom_type == "MultiLineString"
+                else [geom]
+            )
 
-            geometries_vues.add(signature)
+            for ligne in lignes:
+                if ligne.geom_type != "LineString":
+                    continue
 
-            # Folium attend des coordonnées [latitude, longitude].
-            if geom.geom_type == "LineString":
                 coords = [
                     [lat_pt, lon_pt]
-                    for lon_pt, lat_pt in geom.coords
+                    for lon_pt, lat_pt in ligne.coords
                 ]
-                geometries.append(coords)
 
-            elif geom.geom_type == "MultiLineString":
-                for ligne in geom.geoms:
-                    coords = [
-                        [lat_pt, lon_pt]
-                        for lon_pt, lat_pt in ligne.coords
-                    ]
+                if len(coords) >= 2:
                     geometries.append(coords)
 
         return geometries
 
     except Exception as e:
-        print(f"Erreur de récupération de la géométrie : {e}")
+        print(f"Erreur OSMnx : {type(e).__name__}: {e}")
         return []
 
 
