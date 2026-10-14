@@ -53,8 +53,6 @@ def normaliser_nom_rue(nom):
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-
-@st.cache_data(ttl=86400, show_spinner=False)
 def obtenir_geometrie_rue(lat, lon, nom_rue, type_rue="Rue"):
     """
     Récupère la géométrie réelle de la rue autour de l'adresse.
@@ -254,11 +252,13 @@ coul = (
 )
 
 # Récupération de la géométrie complète de la rue
-with st.spinner("Récupération du tracé réel de la rue..."):
+
+with st.spinner("Recherche du tracé de la rue..."):
     geometries_rue = obtenir_geometrie_rue(
         lat_pivot,
         lon_pivot,
-        nom_v
+        nom_v,
+        type_v
     )
 
 if geometries_rue:
