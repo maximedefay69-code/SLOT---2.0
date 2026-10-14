@@ -1,4 +1,6 @@
 import streamlit as st
+import osmnx as ox
+import unicodedata
 import requests, folium, joblib, math, pytz, numpy as np, pandas as pd
 from streamlit_folium import st_folium
 from datetime import datetime
@@ -40,6 +42,96 @@ def get_weather(lat, lon):
         mto = "Beau" if c in [0,1] else ("Nuageux" if c in [2,3,45,48] else "Pluie")
         return mto, r['current']['temperature_2m']
     except: return "Beau", 18.0
+
+
+def normaliser_nom_rue(nom):
+    """Normalise le nom pour comparer les noms de rues."""
+    nom = str(nom).strip().lower()
+    nom = unicodedata.normalize("NFKD", nom)
+    nom = "".join(c for c in nom if not unicodedata.combining(c))
+    return " ".join(nom.split())
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def obtenir_geometrie_rue(lat, lon, nom_rue):
+    """
+    Récupère le tracé réel de la rue depuis OpenStreetMap.
+    Recherche autour de l'adresse, puis conserve les tronçons
+    portant le nom de la rue recherchée.
+    """
+    try:
+        # On prend une zone suffisamment large pour retrouver
+        # le tracé complet d'une rue longue.
+        G = ox.graph.graph_from_point(
+            (lat, lon),
+            dist=5000,
+            dist_type="bbox",
+            network_type="drive",
+            simplify=True
+        )
+
+        _, edges = ox.convert.graph_to_gdfs(G)
+
+        nom_recherche = normaliser_nom_rue(nom_rue)
+
+        # Certaines rues OSM peuvent avoir plusieurs noms.
+        def correspond_au_nom(nom_osm):
+            if isinstance(nom_osm, list):
+                noms = nom_osm
+            else:
+                noms = [nom_osm]
+
+            return any(
+                normaliser_nom_rue(n) == nom_recherche
+                for n in noms
+                if n
+            )
+
+        rues = edges[
+            edges["name"].apply(correspond_au_nom)
+        ].copy()
+
+        if rues.empty:
+            return []
+
+        # Les rues à double sens peuvent être présentes deux fois.
+        # On déduplique les géométries pour éviter de les dessiner
+        # plusieurs fois.
+        geometries = []
+        geometries_vues = set()
+
+        for geom in rues.geometry:
+            if geom is None or geom.is_empty:
+                continue
+
+            signature = geom.wkb
+            if signature in geometries_vues:
+                continue
+
+            geometries_vues.add(signature)
+
+            # Folium attend des coordonnées [latitude, longitude].
+            if geom.geom_type == "LineString":
+                coords = [
+                    [lat_pt, lon_pt]
+                    for lon_pt, lat_pt in geom.coords
+                ]
+                geometries.append(coords)
+
+            elif geom.geom_type == "MultiLineString":
+                for ligne in geom.geoms:
+                    coords = [
+                        [lat_pt, lon_pt]
+                        for lon_pt, lat_pt in ligne.coords
+                    ]
+                    geometries.append(coords)
+
+        return geometries
+
+    except Exception as e:
+        print(f"Erreur de récupération de la géométrie : {e}")
+        return []
+
 
 def predire_dispo_ia(nom_rue, nb_total, arrdt, mto, temp):
     if not model or not prepro: return 0
@@ -137,12 +229,36 @@ if target_found:
     # Code Couleur IA
     coul = "#e74c3c" if libres <= 1 else ("#f39c12" if libres <= 3 else "#27ae60")
     
-    # Tracé 1 : Avant Pivot
-    if points_avant:
-        folium.PolyLine(points_avant + [[lat_pivot, lon_pivot]], color=coul, weight=12, opacity=0.8).add_to(m)
-    # Tracé 2 : Après Pivot
-    if points_apres:
-        folium.PolyLine([[lat_pivot, lon_pivot]] + points_apres, color=coul, weight=12, opacity=0.8).add_to(m)
+   
+# On garde les seuils actuels de SLOT 2.0
+coul = (
+    "#e74c3c" if libres <= 1
+    else "#f39c12" if libres <= 3
+    else "#27ae60"
+)
+
+# Récupération de la géométrie complète de la rue
+with st.spinner("Récupération du tracé réel de la rue..."):
+    geometries_rue = obtenir_geometrie_rue(
+        lat_pivot,
+        lon_pivot,
+        nom_v
+    )
+
+if geometries_rue:
+    for coords in geometries_rue:
+        folium.PolyLine(
+            locations=coords,
+            color=coul,
+            weight=8,
+            opacity=0.9,
+            tooltip=f"{nom_v} — {libres} place(s) estimée(s)"
+        ).add_to(m)
+else:
+    st.warning(
+        "Le tracé complet de cette rue n'a pas été retrouvé "
+        "dans OpenStreetMap. Vérifie le nom de la rue."
+    )
 
 # Logo Louis
 URL_LOGO = "https://raw.githubusercontent.com/maximedefay69-code/SLOT---2.0/refs/heads/main/SLOT_img.png"
