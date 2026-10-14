@@ -1,6 +1,7 @@
 import streamlit as st
-import osmnx as ox
 import unicodedata
+import time
+import re
 import requests, folium, joblib, math, pytz, numpy as np, pandas as pd
 from streamlit_folium import st_folium
 from datetime import datetime
@@ -35,6 +36,7 @@ def load_assets():
 model, prepro = load_assets()
 
 # --- 2. MOTEUR DE CALCUL DYNAMIQUE ---
+@st.cache_data(ttl=600, show_spinner=False)
 def get_weather(lat, lon):
     try:
         r = requests.get(f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,weather_code").json()
@@ -53,97 +55,77 @@ def normaliser_nom_rue(nom):
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
+
+@st.cache_data(ttl=86400, show_spinner=False)
 def obtenir_geometrie_rue(lat, lon, nom_rue, type_rue="Rue"):
     """
-    Récupère la géométrie réelle de la rue autour de l'adresse.
-    Recherche locale, noms normalisés et cache pour accélérer
-    les recherches suivantes.
+    Récupère les tracés OSM portant le nom de la rue.
+    Requête ciblée Overpass, sans télécharger un graphe complet.
     """
-    try:
-        # Recherche limitée à une zone locale de 800 m.
-        G = ox.graph.graph_from_point(
-            (lat, lon),
-            dist=800,
-            dist_type="bbox",
-            network_type="drive",
-            simplify=True,
-            retain_all=True
+    nom_complet = f"{type_rue} {nom_rue}".strip()
+
+    # Quelques variantes pour tolérer les différences de nommage.
+    variantes = list(dict.fromkeys([
+        nom_complet,
+        nom_rue.strip(),
+    ]))
+
+    clauses = []
+    for nom in variantes:
+        nom_echappe = (
+            nom.replace("\\", "\\\\")
+               .replace('"', '\\"')
+        )
+        clauses.append(
+            f'way["name"="{nom_echappe}"]'
+            f'(around:5000,{lat},{lon});'
         )
 
-        _, edges = ox.convert.graph_to_gdfs(G)
+    requete = (
+        '[out:json][timeout:12];('
+        + "".join(clauses)
+        + ');out geom;'
+    )
 
-        def normaliser(nom):
-            nom = str(nom).strip().lower()
-            nom = unicodedata.normalize("NFKD", nom)
-            nom = "".join(
-                c for c in nom
-                if not unicodedata.combining(c)
-            )
-            return " ".join(nom.split())
-
-        recherche = normaliser(f"{type_rue} {nom_rue}")
-
-        # On accepte le nom avec ou sans son type de voie.
-        variantes = {
-            recherche,
-            normaliser(nom_rue),
-        }
-
-        def correspond(nom_osm):
-            noms = nom_osm if isinstance(nom_osm, list) else [nom_osm]
-
-            for nom in noms:
-                if not nom:
-                    continue
-
-                nom_norm = normaliser(nom)
-
-                if nom_norm in variantes:
-                    return True
-
-                # Tolère notamment le type de voie absent dans OSM.
-                for variante in variantes:
-                    if (
-                        nom_norm.endswith(variante)
-                        or variante.endswith(nom_norm)
-                    ):
-                        return True
-
-            return False
-
-        if "name" not in edges.columns:
-            return []
-
-        rues = edges[edges["name"].apply(correspond)]
+    try:
+        reponse = requests.post(
+            "https://overpass-api.de/api/interpreter",
+            data={"data": requete},
+            timeout=(4, 18),
+        )
+        reponse.raise_for_status()
+        elements = reponse.json().get("elements", [])
 
         geometries = []
+        vus = set()
 
-        for geom in rues.geometry:
-            if geom is None or geom.is_empty:
+        for element in elements:
+            points = element.get("geometry", [])
+            if len(points) < 2:
                 continue
 
-            lignes = (
-                list(geom.geoms)
-                if geom.geom_type == "MultiLineString"
-                else [geom]
+            coords = [
+                [p["lat"], p["lon"]]
+                for p in points
+            ]
+
+            # Déduplication des géométries identiques.
+            signature = tuple(
+                (round(p[0], 7), round(p[1], 7))
+                for p in coords
             )
 
-            for ligne in lignes:
-                if ligne.geom_type != "LineString":
-                    continue
-
-                coords = [
-                    [lat_pt, lon_pt]
-                    for lon_pt, lat_pt in ligne.coords
-                ]
-
-                if len(coords) >= 2:
-                    geometries.append(coords)
+            if signature not in vus:
+                vus.add(signature)
+                geometries.append(coords)
 
         return geometries
 
-    except Exception as e:
-        print(f"Erreur OSMnx : {type(e).__name__}: {e}")
+    except requests.RequestException as e:
+        print(f"Erreur Overpass : {e}")
+        return []
+    except (ValueError, KeyError, TypeError) as e:
+        print(f"Erreur de lecture OSM : {e}")
         return []
 
 
