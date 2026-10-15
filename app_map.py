@@ -85,7 +85,7 @@ if erreur_modele:
         f"recensées, sans estimation. Détail : {erreur_modele}"
     )
 
-with st.form("recherche"):
+with st.form("formulaire_adresse"):
     c1, c2, c3, c4 = st.columns([1, 2, 4, 2])
     with c1:
         num_v = st.number_input("N°", min_value=1, max_value=999, value=6, step=1)
@@ -108,11 +108,11 @@ with st.form("recherche"):
     lancer = st.form_submit_button("Rechercher", type="primary")
 
 if lancer:
-    st.session_state["recherche"] = {
+    st.session_state["derniere_recherche"] = {
         "num": int(num_v), "type": type_v, "nom": nom_v.strip(), "rayon": int(rayon), "osm": afficher_osm,
     }
 
-recherche = st.session_state.get("recherche")
+recherche = st.session_state.get("derniere_recherche")
 if not recherche or not recherche["nom"]:
     st.info("Saisis une adresse parisienne puis clique sur « Rechercher ».")
     st.stop()
