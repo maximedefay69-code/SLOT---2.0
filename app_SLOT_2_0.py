@@ -310,12 +310,12 @@ if nom_v:
                 points_apres = df_rue[df_rue['num'] >= num_v][['lat', 'lon']].values.tolist()
 
 # --- 5. CARTE ---
-m = folium.Map(
+
+carte = folium.Map(
     location=[lat_pivot, lon_pivot],
-    zoom_start=18,
-    tiles="https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}",
-    attr="Tiles &copy; Esri",
-    max_zoom=16
+    zoom_start=17,
+    tiles="OpenStreetMap",
+    control_scale=True,
 )
 
 
