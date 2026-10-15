@@ -174,7 +174,7 @@ pred_principale = predictions.get(cle_principale)
 # ============================================================
 # 5. CARTE
 # ============================================================
-carte = folium.Map(location=[lat, lon], zoom_start=15, max_zoom=19, tiles=None, control_scale=True)
+carte = folium.Map(location=[lat, lon], zoom_start=16, max_zoom=19, tiles=None, control_scale=True)
 
 # Fonds de carte épurés, sans clé API (CARTO, Stadia, Mapbox en exigent une).
 ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
