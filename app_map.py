@@ -451,7 +451,7 @@ if nom_v.strip():
 carte = folium.Map(
     location=[lat_pivot, lon_pivot],
     zoom_start=17,
-    tiles="CartoDB positron",
+    tiles="OpenStreetMap",
     control_scale=True,
 )
 
