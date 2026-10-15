@@ -12,10 +12,8 @@ import requests
 import streamlit as st
 from streamlit_folium import st_folium
 
-# Serveurs Overpass alternatifs
-
-# Serveur Overpass alternatif
-ox.settings.overpass_url = "https://api.mapsource.io"
+# Configuration OSMnx : plusieurs serveurs publics sont essayés automatiquement.
+# Si un serveur est indisponible, la fonction ci-dessous passe au suivant.
 ox.settings.timeout = 60
 ox.settings.requests_timeout = 30
 ox.settings.use_cache = True
@@ -172,67 +170,77 @@ def geocoder_adresse(numero, type_rue, nom_rue):
         return None
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def obtenir_troncons_voisins(lat, lon, rayon=300):
-    """
-    Télécharge le réseau routier autour de l'adresse et renvoie les
-    lignes OSM avec leurs coordonnées Folium [latitude, longitude].
-    """
-    try:
-        graphe = ox.graph.graph_from_point(
-            (lat, lon),
-            dist=rayon,
-            dist_type="bbox",
-            network_type="drive",
-            simplify=True,
-            retain_all=False,
-        )
-        _, edges = ox.convert.graph_to_gdfs(graphe)
+    """Récupère les rues autour de l'adresse en essayant plusieurs serveurs Overpass."""
+    serveurs = [
+        "https://overpass-api.de/api",
+        "https://overpass.kumi.systems/api",
+        "https://overpass.private.coffee/api",
+    ]
+    erreurs = []
 
-        if edges.empty or "name" not in edges.columns:
-            return []
-
-        troncons = []
-        for _, ligne in edges.iterrows():
-            geometrie = ligne.geometry
-            nom = ligne.get("name")
-
-            if geometrie is None or geometrie.is_empty or not nom:
+    for serveur in serveurs:
+        try:
+            ox.settings.overpass_url = serveur
+            graphe = ox.graph.graph_from_point(
+                (lat, lon),
+                dist=rayon,
+                dist_type="bbox",
+                network_type="drive",
+                simplify=True,
+                retain_all=False,
+            )
+            if graphe.number_of_nodes() == 0 or graphe.number_of_edges() == 0:
+                erreurs.append(f"{serveur} : réseau vide")
                 continue
 
-            noms = nom if isinstance(nom, list) else [nom]
-            nom_affiche = str(noms[0])
+            _, edges = ox.convert.graph_to_gdfs(graphe)
+            if edges.empty:
+                erreurs.append(f"{serveur} : aucune rue retournée")
+                continue
 
-            lignes = (
-                list(geometrie.geoms)
-                if geometrie.geom_type == "MultiLineString"
-                else [geometrie]
-            )
-
-            for segment in lignes:
-                if segment.geom_type != "LineString":
+            troncons = []
+            for _, ligne in edges.iterrows():
+                geometrie = ligne.geometry
+                nom = ligne.get("name")
+                if geometrie is None or geometrie.is_empty or not nom:
                     continue
 
-                coords = [
-                    [float(lat_pt), float(lon_pt)]
-                    for lon_pt, lat_pt in segment.coords
-                ]
-                if len(coords) >= 2:
-                    troncons.append({"nom": nom_affiche, "coords": coords})
+                noms = nom if isinstance(nom, list) else [nom]
+                nom_affiche = str(noms[0])
+                lignes = (
+                    list(geometrie.geoms)
+                    if geometrie.geom_type == "MultiLineString"
+                    else [geometrie]
+                )
+                for segment in lignes:
+                    if segment.geom_type != "LineString":
+                        continue
+                    coords = [
+                        [float(lat_pt), float(lon_pt)]
+                        for lon_pt, lat_pt in segment.coords
+                    ]
+                    if len(coords) >= 2:
+                        troncons.append({"nom": nom_affiche, "coords": coords})
 
-        return troncons
+            # Même si des voies sont sans nom, on renvoie les tronçons nommés
+            # récupérés. La carte ne peut associer les données que par nom de rue.
+            if troncons:
+                return troncons
+            erreurs.append(f"{serveur} : aucun tronçon avec nom de rue")
+        except Exception as e:
+            erreurs.append(f"{serveur} : {type(e).__name__}: {e}")
 
-    except Exception as e:
-        # Affiché dans les diagnostics Streamlit plus bas.
-        return [{"_erreur": f"{type(e).__name__}: {e}"}]
+    return [{"_erreur": "Échec de tous les serveurs Overpass. " + " | ".join(erreurs)}]
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def obtenir_places_par_rue(arrdt):
     """
-    Télécharge une page de données de stationnement pour un arrondissement.
-    Limite volontairement la requête à 100 résultats pour réduire l'attente.
-    Attention : cela peut ne pas couvrir toutes les rues de l'arrondissement.
+    Télécharge jusqu’à 1000 enregistrements de stationnement.
+    Les résultats restent susceptibles d’être incomplets si le jeu de données
+    contient davantage d’enregistrements.
     """
     if not arrdt:
         return {}
@@ -240,12 +248,14 @@ def obtenir_places_par_rue(arrdt):
     try:
         reponse = requests.get(
             API_STATIONNEMENT,
-            params={"limit": 100, "offset": 0},
-            timeout=10,
+            params={"limit": 1000, "offset": 0},
+            timeout=20,
         )
         reponse.raise_for_status()
         resultat = reponse.json()
-        lignes = resultat.get("results", [])
+        lignes = resultat.get("results", []) if isinstance(resultat, dict) else []
+        if not isinstance(lignes, list):
+            return {"__erreur__": "Réponse Open Data inattendue : champ results absent ou invalide."}
 
         places_rues = {}
         for record in lignes:
