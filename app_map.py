@@ -61,13 +61,32 @@ def c_geocoder(numero, type_v, nom_v):
         return None, str(e)
 
 
+NOMS_CLE_GOOGLE = ("GOOGLE_MAPS_API_KEY", "google_maps_api_key", "GOOGLE_API_KEY", "google_api_key",
+                   "GMAPS_API_KEY", "MAPS_API_KEY")
+
+
 def lire_cle_google():
-    """Clé Google Maps depuis les secrets Streamlit (ou la variable d'environnement)."""
+    """
+    Clé Google Maps depuis les secrets Streamlit (nom exact ou variante courante,
+    au premier niveau ou dans une section comme [google]), sinon variable d'environnement.
+    Retourne (clé ou None, emplacement trouvé ou None).
+    """
     try:
-        cle = st.secrets.get("GOOGLE_MAPS_API_KEY")
+        secrets = dict(st.secrets)
     except Exception:  # pas de fichier secrets en local
-        cle = None
-    return cle or os.environ.get("GOOGLE_MAPS_API_KEY")
+        secrets = {}
+    for nom in NOMS_CLE_GOOGLE:
+        if secrets.get(nom):
+            return str(secrets[nom]).strip(), nom
+    for section, contenu in secrets.items():
+        if hasattr(contenu, "items"):
+            for nom in NOMS_CLE_GOOGLE:
+                if contenu.get(nom):
+                    return str(contenu[nom]).strip(), f"[{section}] {nom}"
+    for nom in NOMS_CLE_GOOGLE:
+        if os.environ.get(nom):
+            return os.environ[nom].strip(), f"variable d'environnement {nom}"
+    return None, None
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -132,9 +151,10 @@ with st.form("formulaire_adresse"):
     c5, c6 = st.columns([2, 5])
     with c5:
         afficher_osm = st.checkbox(
-            "Tracer aussi les rues OSM (plus lent)", value=True,
-            help="Ajoute en gris le tracé des rues via OpenStreetMap/Overpass. "
-                 "Si ce service est indisponible, la carte reste utilisable.",
+            "Tracer aussi les rues sans stationnement (OSM, plus lent)", value=False,
+            help="Ajoute en gris les rues sans place voiture recensée, via OpenStreetMap/Overpass "
+                 "(serveurs publics souvent saturés : jusqu'à 20 s d'attente). "
+                 "N'a aucun effet sur les estimations du modèle.",
         )
     lancer = st.form_submit_button("Rechercher", type="primary")
 
@@ -173,7 +193,8 @@ with st.status("Recherche en cours…", expanded=False) as statut:
     mto, temperature, err_meteo = c_meteo(lat, lon)
 
     statut.update(label="Trafic en temps réel (Google Maps)…")
-    trafic = c_trafic(round(lat, 3), round(lon, 3), lire_cle_google())
+    cle_google, emplacement_cle = lire_cle_google()
+    trafic = c_trafic(round(lat, 3), round(lon, 3), cle_google)
 
     statut.update(label="Places de stationnement (Paris Open Data)…")
     res_od = c_emprises(lat, lon, recherche["rayon"], arrdt)
@@ -363,11 +384,16 @@ c2.metric("Météo", f"{mto}, {temperature:.0f} °C")
 c3.metric("Heure", datetime.now(core._tz_paris()).strftime("%H:%M"))
 NIVEAUX_TRAFIC = {0.0: "Fluide", 0.5: "Moyen", 1.0: "Dense"}
 if trafic["score"] is None:
-    c4.metric("Trafic", "Indisponible")
+    c4.metric("Trafic", "Non mesuré", "fluide supposé (0)", delta_color="off")
 else:
     c4.metric("Trafic", NIVEAUX_TRAFIC[trafic["score"]], f"{trafic['ecart_s']:+d} s", delta_color="inverse")
 if err_meteo:
     st.caption("⚠️ " + err_meteo)
+if trafic["score"] is None:
+    st.caption(
+        "⚠️ Trafic non mesuré : l'estimation suppose une circulation fluide (valeur par défaut). "
+        f"Raison : {trafic['erreur']}"
+    )
 
 if res_od["methode"] is None:
     st.error("Les données de stationnement de Paris Open Data n'ont pas pu être récupérées. "
@@ -444,12 +470,20 @@ with st.expander("Diagnostics"):
         if getattr(modele, "avertissement", None):
             st.warning(modele.avertissement)
         st.write(f"- rues apprises ({len(modele.rues_apprises)}) : "
-                 f"{', '.join(r.strip() for r in modele.rues_apprises) or 'inconnues'}")
+                 f"{', '.join(dict.fromkeys(r.strip() for r in modele.rues_apprises)) or 'inconnues'}")
         st.write(f"- prédictions calculées : {len(predictions)}")
         if trafic["score"] is None:
             st.write(f"- TRAFIC : indisponible, valeur par défaut {core.TRAFIC_DEFAUT} utilisée")
             st.caption(f"Erreur trafic : {trafic['erreur']}")
+            if not cle_google:
+                try:
+                    noms = ", ".join(sorted(dict(st.secrets).keys())) or "aucun"
+                except Exception:
+                    noms = "aucun fichier de secrets"
+                # Seuls les NOMS des secrets sont affichés, jamais leurs valeurs.
+                st.caption(f"Secrets visibles par cette app : {noms}")
         else:
+            st.caption(f"Clé Google lue depuis : {emplacement_cle}")
             st.write(f"- TRAFIC : **{trafic['score']}** (écart {trafic['ecart_s']:+d} s, source Google "
                      f"{trafic['source']} ; seuils {core.SEUIL_TRAFIC_MOYEN_S} s / {core.SEUIL_TRAFIC_FORT_S} s)")
         st.write(f"- entrée fixe faute de source temps réel : % PARKING OC = {core.PARKING_OC_DEFAUT}")
