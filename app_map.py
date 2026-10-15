@@ -37,7 +37,10 @@ def charger_modele():
         try:
             modele = joblib.load(os.path.join(DOSSIER, f_modele))
             prepro = joblib.load(os.path.join(DOSSIER, f_prepro))
-            m = core.ModeleSlot(modele, prepro, version=nom)
+            m = core.ModeleSlot(modele, prepro)
+            # Attribut posé après coup : fonctionne même si Streamlit Cloud a gardé
+            # en mémoire une ancienne version de slot_core.py (sans `version`).
+            m.version = nom
             if erreurs:
                 m.avertissement = "Version préférée indisponible : " + " | ".join(erreurs)
             return m, None
