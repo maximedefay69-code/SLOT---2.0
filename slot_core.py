@@ -509,6 +509,101 @@ def axe_rue(emprises, pas_m=25.0, largeur_max_m=45.0):
 
 
 # ============================================================
+# Trafic en temps réel (Google Maps)
+# ============================================================
+API_DISTANCE_MATRIX = "https://maps.googleapis.com/maps/api/distancematrix/json"
+API_ROUTES = "https://routes.googleapis.com/directions/v2:computeRoutes"
+
+# Méthode reprise de l'application d'origine (parking-louis) :
+# trajet de l'adresse vers un point décalé de +0,005° en latitude et longitude
+# (≈ 700 m à vol d'oiseau), écart = durée avec trafic − durée normale.
+DECALAGE_TRAJET_DEG = 0.005
+SEUIL_TRAFIC_MOYEN_S = 30    # écart < 30 s            -> 0   (fluide)
+SEUIL_TRAFIC_FORT_S = 120    # 30 s ≤ écart < 120 s    -> 0,5 (moyen) ; au-delà -> 1 (dense)
+
+
+def score_trafic(ecart_s) -> float:
+    """
+    Écart de temps de trajet (secondes) -> valeur TRAFIC du modèle.
+    Échelle 0–1, celle de l'entraînement (min 0, max 1, moyenne 0,09) :
+    l'ancienne app envoyait 0/50/100, soit 100 fois trop.
+    """
+    if ecart_s < SEUIL_TRAFIC_MOYEN_S:
+        return 0.0
+    if ecart_s < SEUIL_TRAFIC_FORT_S:
+        return 0.5
+    return 1.0
+
+
+def _secondes(valeur):
+    """Durée Routes API « 123s » -> 123."""
+    return int(round(float(str(valeur).rstrip("s"))))
+
+
+def obtenir_trafic(lat, lon, cle_api, session=None, timeout=6):
+    """
+    Mesure le trafic autour de l'adresse avec Google Maps.
+    1) API Distance Matrix (celle de l'app d'origine) ;
+    2) à défaut, Routes API (son remplaçant chez Google).
+    Retourne un dict : score (0 / 0,5 / 1 ou None), ecart_s, source, erreur.
+    La clé n'apparaît jamais dans les messages d'erreur.
+    """
+    if not cle_api:
+        return {"score": None, "ecart_s": None, "source": None,
+                "erreur": "Clé GOOGLE_MAPS_API_KEY absente des secrets."}
+    s = _session(session)
+    dest_lat, dest_lon = lat + DECALAGE_TRAJET_DEG, lon + DECALAGE_TRAJET_DEG
+    erreurs = []
+
+    # 1) Distance Matrix (legacy)
+    try:
+        r = s.get(API_DISTANCE_MATRIX, params={
+            "origins": f"{lat:.6f},{lon:.6f}", "destinations": f"{dest_lat:.6f},{dest_lon:.6f}",
+            "departure_time": "now", "traffic_model": "best_guess", "key": cle_api,
+        }, timeout=timeout)
+        d = lire_json(r, "Google Distance Matrix")
+        if d.get("status") != "OK":
+            raise ApiError(f"Google Distance Matrix : {d.get('status')} {str(d.get('error_message', ''))[:150]}")
+        el = d["rows"][0]["elements"][0]
+        if el.get("status") != "OK" or "duration_in_traffic" not in el:
+            raise ApiError(f"Google Distance Matrix : élément {el.get('status')}, pas de durée avec trafic.")
+        ecart = int(el["duration_in_traffic"]["value"]) - int(el["duration"]["value"])
+        return {"score": score_trafic(ecart), "ecart_s": ecart, "source": "Distance Matrix", "erreur": None}
+    except ApiError as e:
+        erreurs.append(str(e))
+    except requests.RequestException as e:
+        erreurs.append(f"Google Distance Matrix injoignable : {type(e).__name__}")  # pas d'URL (contient la clé)
+    except (KeyError, IndexError, TypeError, ValueError):
+        erreurs.append("Google Distance Matrix : réponse inattendue.")
+
+    # 2) Routes API
+    try:
+        corps = {
+            "origin": {"location": {"latLng": {"latitude": lat, "longitude": lon}}},
+            "destination": {"location": {"latLng": {"latitude": dest_lat, "longitude": dest_lon}}},
+            "travelMode": "DRIVE", "routingPreference": "TRAFFIC_AWARE",
+        }
+        r = s.post(API_ROUTES, json=corps, timeout=timeout, headers={
+            "X-Goog-Api-Key": cle_api, "X-Goog-FieldMask": "routes.duration,routes.staticDuration",
+            "Content-Type": "application/json",
+        })
+        d = lire_json(r, "Google Routes")
+        route = (d.get("routes") or [None])[0]
+        if not route or "duration" not in route or "staticDuration" not in route:
+            raise ApiError("Google Routes : aucune durée renvoyée.")
+        ecart = _secondes(route["duration"]) - _secondes(route["staticDuration"])
+        return {"score": score_trafic(ecart), "ecart_s": ecart, "source": "Routes API", "erreur": None}
+    except ApiError as e:
+        erreurs.append(str(e))
+    except requests.RequestException as e:
+        erreurs.append(f"Google Routes injoignable : {type(e).__name__}")
+    except (KeyError, IndexError, TypeError, ValueError):
+        erreurs.append("Google Routes : réponse inattendue.")
+
+    return {"score": None, "ecart_s": None, "source": None, "erreur": " | ".join(erreurs)}
+
+
+# ============================================================
 # Overpass (facultatif) : tracé des rues voisines
 # ============================================================
 HIGHWAYS_ROUTES = (
@@ -665,7 +760,7 @@ class ModeleSlot:
                 return cat
         return None
 
-    def construire_entrees(self, rues, arrdt, mto, temperature, maintenant):
+    def construire_entrees(self, rues, arrdt, mto, temperature, maintenant, trafic=None):
         minutes = maintenant.hour * 60 + maintenant.minute
         socio = DATA_ARRDT.get(arrdt, SOCIO_DEFAUT)
         lignes = []
@@ -679,7 +774,7 @@ class ModeleSlot:
                 # ignoré par l'encodeur (handle_unknown="ignore").
                 "RUE": cat if cat else libelle_rue(nom),
                 "VILLE": "Paris",
-                "TRAFIC": TRAFIC_DEFAUT,
+                "TRAFIC": TRAFIC_DEFAUT if trafic is None else float(trafic),
                 "% PARKING OC": PARKING_OC_DEFAUT,
                 "NBR PLACES": float(places),
                 "REVENUS / H": socio["REV_M"],
@@ -692,16 +787,17 @@ class ModeleSlot:
             })
         return pd.DataFrame(lignes)
 
-    def predire(self, rues, arrdt, mto, temperature, maintenant=None):
+    def predire(self, rues, arrdt, mto, temperature, maintenant=None, trafic=None):
         """
         rues : liste de (nom, nombre_de_places). Une seule passe du modèle.
+        trafic : 0 / 0,5 / 1 mesuré en direct, ou None pour la valeur par défaut (0).
         Retourne une liste de Prediction dans le même ordre.
         """
         if not rues:
             return []
         if maintenant is None:
             maintenant = datetime.now(_tz_paris())
-        df = self.construire_entrees(rues, arrdt, mto, temperature, maintenant)
+        df = self.construire_entrees(rues, arrdt, mto, temperature, maintenant, trafic)
         X = self.prepro.transform(df[self.colonnes])
         sorties = np.asarray(self.modele.predict(X), dtype=float).ravel()
         resultats = []

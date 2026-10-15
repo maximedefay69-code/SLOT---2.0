@@ -61,6 +61,22 @@ def c_geocoder(numero, type_v, nom_v):
         return None, str(e)
 
 
+def lire_cle_google():
+    """Clé Google Maps depuis les secrets Streamlit (ou la variable d'environnement)."""
+    try:
+        cle = st.secrets.get("GOOGLE_MAPS_API_KEY")
+    except Exception:  # pas de fichier secrets en local
+        cle = None
+    return cle or os.environ.get("GOOGLE_MAPS_API_KEY")
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def c_trafic(lat, lon, _cle):
+    # Coordonnées arrondies à ~100 m : même résultat pendant 5 min pour le quartier,
+    # ce qui limite les appels facturés par Google. `_cle` est exclue du cache (préfixe _).
+    return core.obtenir_trafic(lat, lon, _cle)
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def c_meteo(lat, lon):
     return core.obtenir_meteo(lat, lon)
@@ -156,6 +172,9 @@ with st.status("Recherche en cours…", expanded=False) as statut:
     statut.update(label="Météo…")
     mto, temperature, err_meteo = c_meteo(lat, lon)
 
+    statut.update(label="Trafic en temps réel (Google Maps)…")
+    trafic = c_trafic(round(lat, 3), round(lon, 3), lire_cle_google())
+
     statut.update(label="Places de stationnement (Paris Open Data)…")
     res_od = c_emprises(lat, lon, recherche["rayon"], arrdt)
 
@@ -175,7 +194,8 @@ with st.status("Recherche en cours…", expanded=False) as statut:
         statut.update(label="Estimation IA…")
         try:
             sorties = modele.predire(
-                [(r["label"], r["places"]) for _, r in a_predire], arrdt, mto, temperature
+                [(r["label"], r["places"]) for _, r in a_predire], arrdt, mto, temperature,
+                trafic=trafic["score"],
             )
             predictions = {cle: p for (cle, _), p in zip(a_predire, sorties)}
         except Exception as e:
@@ -337,10 +357,15 @@ if nb_formes == 0:
 # 6. RÉSULTATS
 # ============================================================
 st.markdown("### Résultat")
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 c1.metric("Arrondissement", f"{arrdt}ᵉ")
 c2.metric("Météo", f"{mto}, {temperature:.0f} °C")
 c3.metric("Heure", datetime.now(core._tz_paris()).strftime("%H:%M"))
+NIVEAUX_TRAFIC = {0.0: "Fluide", 0.5: "Moyen", 1.0: "Dense"}
+if trafic["score"] is None:
+    c4.metric("Trafic", "Indisponible")
+else:
+    c4.metric("Trafic", NIVEAUX_TRAFIC[trafic["score"]], f"{trafic['ecart_s']:+d} s", delta_color="inverse")
 if err_meteo:
     st.caption("⚠️ " + err_meteo)
 
@@ -421,10 +446,13 @@ with st.expander("Diagnostics"):
         st.write(f"- rues apprises ({len(modele.rues_apprises)}) : "
                  f"{', '.join(r.strip() for r in modele.rues_apprises) or 'inconnues'}")
         st.write(f"- prédictions calculées : {len(predictions)}")
-        st.write(
-            f"- entrées fixes faute de source temps réel : TRAFIC = {core.TRAFIC_DEFAUT}, "
-            f"% PARKING OC = {core.PARKING_OC_DEFAUT}"
-        )
+        if trafic["score"] is None:
+            st.write(f"- TRAFIC : indisponible, valeur par défaut {core.TRAFIC_DEFAUT} utilisée")
+            st.caption(f"Erreur trafic : {trafic['erreur']}")
+        else:
+            st.write(f"- TRAFIC : **{trafic['score']}** (écart {trafic['ecart_s']:+d} s, source Google "
+                     f"{trafic['source']} ; seuils {core.SEUIL_TRAFIC_MOYEN_S} s / {core.SEUIL_TRAFIC_FORT_S} s)")
+        st.write(f"- entrée fixe faute de source temps réel : % PARKING OC = {core.PARKING_OC_DEFAUT}")
         alertes = [a for p in predictions.values() for a in p.alertes]
         hors_plage = [rues[c]["label"] for c, p in predictions.items() if p.hors_plage_places]
         if hors_plage:
