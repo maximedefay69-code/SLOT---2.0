@@ -1,603 +1,346 @@
-import math
-import unicodedata
+"""
+SLOT 2.0 — Radar de stationnement (point d'entrée Streamlit).
+
+Lancer en local :  streamlit run app_map.py
+"""
+
+import os
 from datetime import datetime
 
 import folium
 import joblib
-import numpy as np
-import osmnx as ox
-import pandas as pd
-import pytz
-import requests
 import streamlit as st
 from streamlit_folium import st_folium
 
-# Configuration OSMnx : plusieurs serveurs publics sont essayés automatiquement.
-# Si un serveur est indisponible, la fonction ci-dessous passe au suivant.
-ox.settings.timeout = 60
-ox.settings.requests_timeout = 30
-ox.settings.use_cache = True
+import slot_core as core
 
+st.set_page_config(page_title="SLOT 2.0 - Radar de stationnement", layout="wide")
 
-
-# ============================================================
-# 1. CONFIGURATION
-# ============================================================
-st.set_page_config(page_title="SLOT 2.0 - Radar Temps Réel", layout="wide")
-
-API_ADRESSE = "https://api-adresse.data.gouv.fr/search/"
-API_STATIONNEMENT = (
-    "https://opendata.paris.fr/api/explore/v2.1/catalog/datasets/"
-    "stationnement-sur-voie-publique-emprises/records"
-)
-URL_LOGO = (
-    "https://raw.githubusercontent.com/maximedefay69-code/"
-    "SLOT---2.0/refs/heads/main/SLOT_img.png"
-)
-
-DATA_ARRDT = {
-    1: {"REV_M": 2916, "VEH": 0.32},
-    2: {"REV_M": 2666, "VEH": 0.28},
-    3: {"REV_M": 2833, "VEH": 0.25},
-    4: {"REV_M": 2750, "VEH": 0.26},
-    5: {"REV_M": 3166, "VEH": 0.35},
-    6: {"REV_M": 3750, "VEH": 0.38},
-    7: {"REV_M": 4166, "VEH": 0.42},
-    8: {"REV_M": 4000, "VEH": 0.40},
-    9: {"REV_M": 3000, "VEH": 0.30},
-    10: {"REV_M": 2333, "VEH": 0.22},
-    11: {"REV_M": 2583, "VEH": 0.24},
-    12: {"REV_M": 2500, "VEH": 0.33},
-    13: {"REV_M": 2250, "VEH": 0.35},
-    14: {"REV_M": 2583, "VEH": 0.36},
-    15: {"REV_M": 2916, "VEH": 0.38},
-    16: {"REV_M": 4583, "VEH": 0.45},
-    17: {"REV_M": 3083, "VEH": 0.37},
-    18: {"REV_M": 2083, "VEH": 0.20},
-    19: {"REV_M": 1833, "VEH": 0.22},
-    20: {"REV_M": 1916, "VEH": 0.23},
-}
-
-JOURS_FR = {
-    "Monday": "Lundi",
-    "Tuesday": "Mardi",
-    "Wednesday": "Mercredi",
-    "Thursday": "Jeudi",
-    "Friday": "Vendredi",
-    "Saturday": "Samedi",
-    "Sunday": "Dimanche",
-}
+DOSSIER = os.path.dirname(os.path.abspath(__file__))
+FICHIER_MODELE = os.path.join(DOSSIER, "modele_lightgbmDA.pkl")
+FICHIER_PREPRO = os.path.join(DOSSIER, "preprocessorDA.pkl")
+FICHIER_LOGO = os.path.join(DOSSIER, "SLOT_img.png")
 
 
 # ============================================================
-# 2. CHARGEMENT DU MODÈLE
+# 1. CHARGEMENT DU MODÈLE (une seule fois par serveur)
 # ============================================================
-@st.cache_resource
-def load_assets():
+@st.cache_resource(show_spinner=False)
+def charger_modele():
     try:
-        modele = joblib.load("modele_lightgbmDA.pkl")
-        preprocesseur = joblib.load("preprocessorDA.pkl")
-        return modele, preprocesseur
-    except Exception as e:
-        st.error(
-            "Impossible de charger le modèle IA ou le préprocesseur. "
-            "Vérifie que modele_lightgbmDA.pkl et preprocessorDA.pkl "
-            f"sont dans le dossier de l'application. Détail : {e}"
-        )
-        return None, None
-
-
-model, prepro = load_assets()
+        modele = joblib.load(FICHIER_MODELE)
+        prepro = joblib.load(FICHIER_PREPRO)
+        return core.ModeleSlot(modele, prepro), None
+    except Exception as e:  # fichier absent, version de bibliothèque incompatible...
+        return None, f"{type(e).__name__}: {e}"
 
 
 # ============================================================
-# 3. OUTILS
+# 2. APPELS RÉSEAU MIS EN CACHE
+#    Les coordonnées sont arrondies (~1 m) pour réutiliser le cache.
 # ============================================================
-def normaliser_nom_rue(nom):
-    """Minuscule, sans accents, espaces normalisés."""
-    nom = str(nom or "").strip().lower()
-    nom = unicodedata.normalize("NFKD", nom)
-    nom = "".join(c for c in nom if not unicodedata.combining(c))
-    return " ".join(nom.split())
-
-
-def obtenir_meteo(lat, lon):
-    """Récupère la météo actuelle via Open-Meteo."""
-    try:
-        reponse = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": lat,
-                "longitude": lon,
-                "current": "temperature_2m,weather_code",
-            },
-            timeout=8,
-        )
-        reponse.raise_for_status()
-        courant = reponse.json()["current"]
-        code = courant.get("weather_code", 0)
-        temperature = float(courant.get("temperature_2m", 18.0))
-
-        if code in [0, 1]:
-            meteo = "Beau"
-        elif code in [2, 3, 45, 48]:
-            meteo = "Nuageux"
-        else:
-            meteo = "Pluie"
-
-        return meteo, temperature
-    except Exception:
-        # Valeurs de secours si le service météo est indisponible.
-        return "Beau", 18.0
-
-
 @st.cache_data(ttl=86400, show_spinner=False)
-def geocoder_adresse(numero, type_rue, nom_rue):
-    """Géocode l'adresse parisienne avec l'API Adresse."""
-    requete = f"{numero} {type_rue} {nom_rue} Paris"
+def c_geocoder(numero, type_v, nom_v):
     try:
-        reponse = requests.get(
-            API_ADRESSE,
-            params={"q": requete, "limit": 1},
-            timeout=10,
-        )
-        reponse.raise_for_status()
-        donnees = reponse.json()
-        if not donnees.get("features"):
-            return None
-
-        feature = donnees["features"][0]
-        lon, lat = feature["geometry"]["coordinates"]
-        proprietes = feature.get("properties", {})
-        code_postal = str(proprietes.get("postcode", ""))
-
-        # Les codes postaux parisiens sont de type 75001 à 75020.
-        arrdt = None
-        if len(code_postal) >= 5 and code_postal.startswith("75"):
-            arrdt = int(code_postal[-2:])
-            if arrdt == 0:
-                arrdt = 20
-
-        return {
-            "lat": float(lat),
-            "lon": float(lon),
-            "arrdt": arrdt,
-            "adresse": proprietes.get("label", requete),
-            "postcode": code_postal,
-        }
-    except Exception as e:
-        st.warning(f"Erreur lors du géocodage : {e}")
-        return None
+        return core.geocoder_adresse(numero, type_v, nom_v), None
+    except core.ApiError as e:
+        return None, str(e)
 
 
-@st.cache_data(ttl=900, show_spinner=False)
-def obtenir_troncons_voisins(lat, lon, rayon=300):
-    """Récupère les rues autour de l'adresse en essayant plusieurs serveurs Overpass."""
-    serveurs = [
-        "https://overpass-api.de/api",
-        "https://overpass.kumi.systems/api",
-        "https://overpass.private.coffee/api",
-    ]
-    erreurs = []
+@st.cache_data(ttl=600, show_spinner=False)
+def c_meteo(lat, lon):
+    return core.obtenir_meteo(lat, lon)
 
-    for serveur in serveurs:
-        try:
-            ox.settings.overpass_url = serveur
-            graphe = ox.graph.graph_from_point(
-                (lat, lon),
-                dist=rayon,
-                dist_type="bbox",
-                network_type="drive",
-                simplify=True,
-                retain_all=False,
-            )
-            if graphe.number_of_nodes() == 0 or graphe.number_of_edges() == 0:
-                erreurs.append(f"{serveur} : réseau vide")
-                continue
 
-            _, edges = ox.convert.graph_to_gdfs(graphe)
-            if edges.empty:
-                erreurs.append(f"{serveur} : aucune rue retournée")
-                continue
-
-            troncons = []
-            for _, ligne in edges.iterrows():
-                geometrie = ligne.geometry
-                nom = ligne.get("name")
-                if geometrie is None or geometrie.is_empty or not nom:
-                    continue
-
-                noms = nom if isinstance(nom, list) else [nom]
-                nom_affiche = str(noms[0])
-                lignes = (
-                    list(geometrie.geoms)
-                    if geometrie.geom_type == "MultiLineString"
-                    else [geometrie]
-                )
-                for segment in lignes:
-                    if segment.geom_type != "LineString":
-                        continue
-                    coords = [
-                        [float(lat_pt), float(lon_pt)]
-                        for lon_pt, lat_pt in segment.coords
-                    ]
-                    if len(coords) >= 2:
-                        troncons.append({"nom": nom_affiche, "coords": coords})
-
-            # Même si des voies sont sans nom, on renvoie les tronçons nommés
-            # récupérés. La carte ne peut associer les données que par nom de rue.
-            if troncons:
-                return troncons
-            erreurs.append(f"{serveur} : aucun tronçon avec nom de rue")
-        except Exception as e:
-            erreurs.append(f"{serveur} : {type(e).__name__}: {e}")
-
-    return [{"_erreur": "Échec de tous les serveurs Overpass. " + " | ".join(erreurs)}]
+@st.cache_data(ttl=3600, show_spinner=False)
+def c_emprises(lat, lon, rayon, arrdt):
+    return core.recuperer_emprises(lat, lon, rayon, arrdt)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def obtenir_places_par_rue(arrdt):
-    """
-    Télécharge jusqu’à 1000 enregistrements de stationnement.
-    Les résultats restent susceptibles d’être incomplets si le jeu de données
-    contient davantage d’enregistrements.
-    """
-    if not arrdt:
-        return {}
+def c_rues_osm(lat, lon, rayon):
+    return core.recuperer_rues_osm(lat, lon, rayon)
 
-    try:
-        reponse = requests.get(
-            API_STATIONNEMENT,
-            params={"limit": 1000, "offset": 0},
-            timeout=20,
+
+modele, erreur_modele = charger_modele()
+
+
+# ============================================================
+# 3. INTERFACE DE SAISIE (formulaire : aucune requête avant validation)
+# ============================================================
+col_logo, col_titre = st.columns([1, 12])
+with col_logo:
+    if os.path.exists(FICHIER_LOGO):
+        st.image(FICHIER_LOGO, width=64)
+with col_titre:
+    st.title("SLOT 2.0 — Radar de stationnement")
+st.caption(
+    "Estimation indicative des places libres par un modèle d'IA, à partir des "
+    "places recensées par la Ville de Paris. Ce n'est pas un comptage en direct."
+)
+
+if erreur_modele:
+    st.error(
+        "Le modèle IA n'a pas pu être chargé : la carte affichera les places "
+        f"recensées, sans estimation. Détail : {erreur_modele}"
+    )
+
+with st.form("recherche"):
+    c1, c2, c3, c4 = st.columns([1, 2, 4, 2])
+    with c1:
+        num_v = st.number_input("N°", min_value=1, max_value=999, value=6, step=1)
+    with c2:
+        type_v = st.selectbox(
+            "Type de voie",
+            ["Rue", "Boulevard", "Avenue", "Place", "Quai", "Passage", "Impasse", "Allée", "Cours", "Square"],
         )
-        reponse.raise_for_status()
-        resultat = reponse.json()
-        lignes = resultat.get("results", []) if isinstance(resultat, dict) else []
-        if not isinstance(lignes, list):
-            return {"__erreur__": "Réponse Open Data inattendue : champ results absent ou invalide."}
+    with c3:
+        nom_v = st.text_input("Nom de la voie", value="Pelouze")
+    with c4:
+        rayon = st.select_slider("Rayon (m)", options=[150, 250, 300, 400, 500], value=300)
+    c5, c6 = st.columns([2, 5])
+    with c5:
+        afficher_osm = st.checkbox(
+            "Tracer aussi les rues OSM (plus lent)", value=True,
+            help="Ajoute en gris le tracé des rues via OpenStreetMap/Overpass. "
+                 "Si ce service est indisponible, la carte reste utilisable.",
+        )
+    lancer = st.form_submit_button("Rechercher", type="primary")
 
-        places_rues = {}
-        for record in lignes:
-            record_arrdt = str(record.get("arrond", "")).strip()
-            # Selon la structure du jeu de données, l'arrondissement peut
-            # être un nombre ou une chaîne.
-            chiffres = "".join(c for c in record_arrdt if c.isdigit())
-            if chiffres and int(chiffres[-2:]) != int(arrdt):
-                continue
-
-            nom = record.get("nomvoie")
-            if not nom:
-                continue
-
-            reg = str(record.get("regpri", "")).upper()
-            if not any(
-                terme in reg
-                for terme in ["PAYANT ROTATIF", "PAYANT MIXTE", "GRATUIT"]
-            ):
-                continue
-
-            nom_norm = normaliser_nom_rue(nom)
-            nb = pd.to_numeric(record.get("placal", 0), errors="coerce")
-            if pd.isna(nb):
-                nb = 0
-
-            places_rues[nom_norm] = places_rues.get(nom_norm, 0) + int(nb)
-
-        return places_rues
-
-    except Exception as e:
-        return {"__erreur__": f"{type(e).__name__}: {e}"}
-
-
-def predire_dispo_ia(nom_rue, nb_total, arrdt, meteo, temperature):
-    """Estime le nombre de places libres à partir du modèle existant."""
-    if model is None or prepro is None:
-        return None, "Modèle IA non chargé."
-
-    tz = pytz.timezone("Europe/Paris")
-    maintenant = datetime.now(tz)
-    minutes = maintenant.hour * 60 + maintenant.minute
-    socio = DATA_ARRDT.get(arrdt, {"REV_M": 2500, "VEH": 0.30})
-
-    donnees = {
-        "DATE": maintenant.strftime("%d/%m/%Y"),
-        "JOUR": JOURS_FR.get(maintenant.strftime("%A")),
-        "HEURE": maintenant.strftime("%H:%M"),
-        "RUE": str(nom_rue).upper(),
-        "VILLE": "Paris",
-        "TRAFIC": 0.0,
-        "% PARKING OC": 0.5,
-        "NBR PLACES": nb_total,
-        "REVENUS / H": socio["REV_M"],
-        "VEHICULES / H": socio["VEH"],
-        "MTO": meteo,
-        "TEMPERATURE": temperature,
-        "HEURE_MINUTES": minutes,
-        "HEURE_SIN": np.sin(2 * np.pi * minutes / 1440),
-        "HEURE_COS": np.cos(2 * np.pi * minutes / 1440),
+if lancer:
+    st.session_state["recherche"] = {
+        "num": int(num_v), "type": type_v, "nom": nom_v.strip(), "rayon": int(rayon), "osm": afficher_osm,
     }
 
-    colonnes = [
-        "DATE", "JOUR", "HEURE", "RUE", "VILLE", "TRAFIC",
-        "% PARKING OC", "NBR PLACES", "REVENUS / H", "VEHICULES / H",
-        "MTO", "TEMPERATURE", "HEURE_MINUTES", "HEURE_SIN", "HEURE_COS",
-    ]
-
-    try:
-        X = pd.DataFrame([donnees])[colonnes]
-        occupation = float(model.predict(prepro.transform(X))[0])
-
-        # Si le modèle renvoie une proportion, la conversion est directe.
-        # Si la sortie est hors de [0,1], on la borne pour éviter des
-        # résultats aberrants dans l'affichage.
-        occupation = min(1.0, max(0.0, occupation))
-        libres = max(0, min(int(nb_total), math.floor(nb_total * (1 - occupation))))
-        return libres, None
-    except Exception as e:
-        return None, f"Erreur de prédiction IA : {type(e).__name__}: {e}"
-
-
-def couleur_pour_places(libres):
-    """Vert = plus de places estimées, orange = peu, rouge = très peu."""
-    if libres is None:
-        return "#7f8c8d"
-    if libres <= 1:
-        return "#e74c3c"
-    if libres <= 3:
-        return "#f39c12"
-    return "#27ae60"
+recherche = st.session_state.get("recherche")
+if not recherche or not recherche["nom"]:
+    st.info("Saisis une adresse parisienne puis clique sur « Rechercher ».")
+    st.stop()
 
 
 # ============================================================
-# 4. INTERFACE
+# 4. RECHERCHE ET CALCUL
 # ============================================================
-st.title("🛰️ SLOT 2.0 — Radar de stationnement")
-st.caption(
-    "Estimation indicative des places libres. Les données disponibles "
-    "peuvent être incomplètes et ne constituent pas un comptage en direct."
-)
-
-c1, c2, c3 = st.columns([1, 2, 4])
-with c1:
-    num_v = st.number_input("N°", min_value=1, max_value=999, value=11, step=1)
-with c2:
-    type_v = st.selectbox(
-        "Type de voie",
-        ["Rue", "Boulevard", "Avenue", "Place", "Quai", "Passage", "Impasse"],
-    )
-with c3:
-    nom_v = st.text_input("Nom de la voie", value="Voltaire")
-
-c4, c5 = st.columns([1, 3])
-with c4:
-    rayon = st.select_slider("Rayon des rues voisines", options=[150, 250, 300, 400, 500], value=300)
-with c5:
-    st.caption(
-        "Les données OSM et Open Data sont chargées à la demande et mises en cache "
-        "pour accélérer les recherches suivantes."
-    )
-
-
-# ============================================================
-# 5. RECHERCHE ET CALCUL
-# ============================================================
-lat_pivot, lon_pivot = 48.8566, 2.3522
-arrdt = None
-adresse_trouvee = None
-meteo = "Beau"
-temperature = 18.0
-total_places = 0
-libres_rue = None
-erreur_ia = None
-erreur_troncons = None
-troncons = []
-places_rues = {}
-geometries_rue_principale = []
-geocodage_ok = False
-
-if nom_v.strip():
-    with st.spinner("Recherche de l'adresse..."):
-        resultat_geo = geocoder_adresse(int(num_v), type_v, nom_v.strip())
-
-    if resultat_geo:
-        lat_pivot = resultat_geo["lat"]
-        lon_pivot = resultat_geo["lon"]
-        arrdt = resultat_geo["arrdt"]
-        adresse_trouvee = resultat_geo["adresse"]
-        geocodage_ok = True
-
-        if arrdt is None:
-            st.warning(
-                "L'adresse a été trouvée, mais l'arrondissement n'a pas pu être "
-                "déduit du code postal. Les statistiques par arrondissement seront limitées."
-            )
-
-        with st.spinner("Récupération de la météo..."):
-            meteo, temperature = obtenir_meteo(lat_pivot, lon_pivot)
-
-        with st.spinner(f"Recherche des rues dans un rayon de {rayon} m..."):
-            resultat_troncons = obtenir_troncons_voisins(lat_pivot, lon_pivot, rayon)
-
-        if resultat_troncons and "_erreur" in resultat_troncons[0]:
-            erreur_troncons = resultat_troncons[0]["_erreur"]
-            troncons = []
-        else:
-            troncons = resultat_troncons
-
-        # Récupère une seule page du jeu de données, sans boucle de pagination.
-        if arrdt:
-            with st.spinner("Récupération des données de stationnement..."):
-                places_rues = obtenir_places_par_rue(arrdt)
-
-        # Recherche de la rue principale parmi les tronçons OSM.
-        recherche = normaliser_nom_rue(f"{type_v} {nom_v}")
-        recherche_simple = normaliser_nom_rue(nom_v)
-
-        for troncon in troncons:
-            nom_osm = normaliser_nom_rue(troncon["nom"])
-            if (
-                nom_osm == recherche
-                or nom_osm == recherche_simple
-                or nom_osm.endswith(recherche_simple)
-                or recherche_simple.endswith(nom_osm)
-            ):
-                geometries_rue_principale.append(troncon["coords"])
-
-        # Estimation principale : données de places disponibles si la rue
-        # correspond à une entrée présente dans la page Open Data récupérée.
-        if isinstance(places_rues, dict) and "__erreur__" not in places_rues:
-            cle = normaliser_nom_rue(nom_v)
-            cle_avec_type = normaliser_nom_rue(f"{type_v} {nom_v}")
-            total_places = places_rues.get(cle, places_rues.get(cle_avec_type, 0))
-
-        if total_places > 0 and arrdt:
-            libres_rue, erreur_ia = predire_dispo_ia(
-                nom_v, total_places, arrdt, meteo, temperature
-            )
-        elif model is None or prepro is None:
-            erreur_ia = "Modèle IA non chargé."
-    else:
+with st.status("Recherche en cours…", expanded=False) as statut:
+    statut.update(label="Géocodage de l'adresse…")
+    geo, err_geo = c_geocoder(recherche["num"], recherche["type"], recherche["nom"])
+    if err_geo:
+        statut.update(label="Erreur de géocodage", state="error")
+        st.error(f"Le service de géocodage ne répond pas correctement : {err_geo}")
+        st.stop()
+    if not geo:
+        statut.update(label="Adresse introuvable", state="error")
         st.error(
-            "Adresse introuvable. Essaie un nom de voie plus simple, "
-            "par exemple « Voltaire », et vérifie le numéro."
+            "Adresse introuvable dans Paris. Vérifie le numéro et le nom de la voie "
+            "(par exemple « Voltaire » avec le type « Boulevard »)."
         )
+        st.stop()
+
+    lat, lon, arrdt = round(geo["lat"], 5), round(geo["lon"], 5), geo["arrdt"]
+
+    statut.update(label="Météo…")
+    mto, temperature, err_meteo = c_meteo(lat, lon)
+
+    statut.update(label="Places de stationnement (Paris Open Data)…")
+    res_od = c_emprises(lat, lon, recherche["rayon"], arrdt)
+
+    troncons_osm, erreurs_osm = [], []
+    if recherche["osm"]:
+        statut.update(label="Tracé des rues (OpenStreetMap)…")
+        troncons_osm, erreurs_osm = c_rues_osm(lat, lon, recherche["rayon"])
+
+    rues = core.agreger_par_rue(res_od["emprises"])
+    cle_principale = core.cle_rue(geo["rue"])
+
+    # Prédiction IA : une seule passe pour toutes les rues avec des places connues.
+    predictions = {}
+    erreur_ia = None
+    a_predire = [(r["cle"], r) for r in rues.values() if r["places"] > 0]
+    if modele and a_predire:
+        statut.update(label="Estimation IA…")
+        try:
+            sorties = modele.predire(
+                [(r["label"], r["places"]) for _, r in a_predire], arrdt, mto, temperature
+            )
+            predictions = {cle: p for (cle, _), p in zip(a_predire, sorties)}
+        except Exception as e:
+            erreur_ia = f"{type(e).__name__}: {e}"
+    statut.update(label="Recherche terminée", state="complete")
+
+rue_principale = rues.get(cle_principale)
+pred_principale = predictions.get(cle_principale)
 
 
 # ============================================================
-# 6. CARTE
+# 5. CARTE
 # ============================================================
-carte = folium.Map(
-    location=[lat_pivot, lon_pivot],
-    zoom_start=17,
-    tiles="OpenStreetMap",
-    control_scale=True,
-)
+carte = folium.Map(location=[lat, lon], zoom_start=17, tiles=None, control_scale=True)
+folium.TileLayer("OpenStreetMap", name="Plan OpenStreetMap").add_to(carte)
+folium.TileLayer("CartoDB positron", name="Plan clair (CARTO)").add_to(carte)
 
-# Si la géométrie de la rue principale a été trouvée, on la dessine.
-if geometries_rue_principale:
-    couleur_principale = couleur_pour_places(libres_rue)
-    for coords in geometries_rue_principale:
-        folium.PolyLine(
-            locations=coords,
-            color=couleur_principale,
-            weight=8,
-            opacity=0.95,
-            tooltip=(
-                f"{type_v} {nom_v} — "
-                + (
-                    f"{libres_rue} place(s) libre(s) estimée(s)"
-                    if libres_rue is not None
-                    else "estimation indisponible"
-                )
-            ),
-        ).add_to(carte)
-
-# Dessine les rues voisines. Faute d'une prédiction fiable par segment,
-# la couleur grise signifie « données/prédiction indisponibles ».
-for troncon in troncons:
-    if "_erreur" in troncon:
-        continue
-
-    nom_osm = normaliser_nom_rue(troncon["nom"])
-    est_rue_principale = (
-        nom_osm == normaliser_nom_rue(nom_v)
-        or nom_osm == normaliser_nom_rue(f"{type_v} {nom_v}")
-        or nom_osm.endswith(normaliser_nom_rue(nom_v))
-    )
-    if est_rue_principale:
-        continue
-
-    cle = normaliser_nom_rue(troncon["nom"])
-    nb_places_voisines = places_rues.get(cle, 0) if isinstance(places_rues, dict) else 0
-
-    # On ne lance pas une prédiction IA pour chaque rue voisine sans données
-    # fiables sur son nombre total de places.
-    if nb_places_voisines > 0 and arrdt:
-        libres_voisines, _ = predire_dispo_ia(
-            troncon["nom"], nb_places_voisines, arrdt, meteo, temperature
-        )
-        couleur = couleur_pour_places(libres_voisines)
-        info = f"{troncon['nom']} — {libres_voisines} place(s) estimée(s)"
-    else:
-        couleur = "#9aa0a6"
-        info = f"{troncon['nom']} — données de stationnement non trouvées"
-
+couche_osm = folium.FeatureGroup(name="Rues (OpenStreetMap)", show=True)
+for t in troncons_osm:
+    principale = t["cle"] == cle_principale
     folium.PolyLine(
-        locations=troncon["coords"],
-        color=couleur,
-        weight=4,
-        opacity=0.7,
-        tooltip=info,
-    ).add_to(carte)
+        t["coords"],
+        color="#1f4e79" if principale else "#9aa0a6",
+        weight=6 if principale else 3,
+        opacity=0.8 if principale else 0.6,
+        tooltip=t["nom"] + (" (rue recherchée)" if principale else ""),
+    ).add_to(couche_osm)
+couche_osm.add_to(carte)
 
-if geocodage_ok:
-    folium.Marker(
-        [lat_pivot, lon_pivot],
-        tooltip=adresse_trouvee or f"{num_v} {type_v} {nom_v}, Paris",
-        popup=folium.Popup(
-            f"<b>{adresse_trouvee or f'{num_v} {type_v} {nom_v}, Paris'}</b>",
-            max_width=300,
-        ),
-        icon=folium.Icon(color="blue", icon="info-sign"),
-    ).add_to(carte)
-
-folium.LayerControl().add_to(carte)
-
-st.subheader("Carte des rues et du stationnement")
-st_folium(carte, width=None, height=700, key="slot20_map")
-
-
-# ============================================================
-# 7. RÉSULTATS ET DIAGNOSTICS
-# ============================================================
-if geocodage_ok:
-    st.markdown("### Résultat")
-    st.write(f"**Adresse reconnue :** {adresse_trouvee}")
-    st.write(f"**Arrondissement :** {arrdt if arrdt else 'non déterminé'}")
-    st.write(f"**Météo :** {meteo}, {temperature} °C")
-
-    if total_places > 0:
-        st.write(f"**Places recensées pour la rue :** {total_places}")
-        if libres_rue is not None:
-            st.success(
-                f"Estimation IA : **{libres_rue} place(s) libre(s)** sur "
-                f"{total_places} place(s) recensée(s)."
-            )
-        else:
-            st.warning(
-                "Les places sont recensées, mais la prédiction IA n'a pas pu "
-                "être calculée."
-            )
-            if erreur_ia:
-                st.caption(erreur_ia)
+couche_places = folium.FeatureGroup(name="Stationnement (estimation IA)", show=True)
+nb_formes = 0
+for cle, rue in rues.items():
+    pred = predictions.get(cle)
+    couleur = core.couleur_pour_places(pred.libres if pred else None)
+    principale = cle == cle_principale
+    if pred:
+        info = (f"<b>{rue['label']}</b>{' (rue recherchée)' if principale else ''}<br>"
+                f"{pred.libres} place(s) libre(s) estimée(s) sur {rue['places']} recensée(s) "
+                f"dans le rayon<br>Occupation estimée : {pred.occupation:.0%}")
+        if not pred.rue_connue:
+            info += "<br><i>Rue absente de l'entraînement : estimation générique.</i>"
     else:
-        st.warning(
-            "Aucun total de places n'a été retrouvé pour cette rue dans les "
-            "résultats Open Data chargés. Cela ne signifie pas qu'il n'y a "
-            "aucune place : la page de résultats peut être incomplète."
-        )
-        if isinstance(places_rues, dict) and "__erreur__" in places_rues:
-            st.caption(f"Erreur Open Data : {places_rues['__erreur__']}")
+        info = f"<b>{rue['label']}</b><br>{rue['places']} place(s) recensée(s) — estimation indisponible"
+    for emprise in rue["emprises"]:
+        details = (f"{info}<br><small>Emprise : {emprise['regpri'].title() or 'régime inconnu'}, "
+                   f"{emprise['places'] if emprise['places'] is not None else '?'} place(s)</small>")
+        for genre, coords in emprise["geometries"]:
+            options = dict(color="#111111" if principale else couleur, weight=3 if principale else 2,
+                           fill=True, fill_color=couleur, fill_opacity=0.75,
+                           tooltip=folium.Tooltip(details))
+            if genre == "polygon":
+                folium.Polygon(coords, **options).add_to(couche_places)
+            else:
+                folium.PolyLine(coords, color=couleur, weight=6, tooltip=folium.Tooltip(details)).add_to(couche_places)
+            nb_formes += 1
+        if not emprise["geometries"] and emprise["point"]:
+            # Pas de polygone : on montre au moins le point de l'emprise.
+            folium.CircleMarker(emprise["point"], radius=5, color=couleur, fill=True, fill_opacity=0.9,
+                                tooltip=folium.Tooltip(details)).add_to(couche_places)
+            nb_formes += 1
+couche_places.add_to(carte)
 
-    with st.expander("Diagnostics — pour comprendre les rues manquantes"):
-        st.write("Adresse trouvée :", geocodage_ok)
-        st.write("Arrondissement :", arrdt)
-        st.write("Nombre de tronçons OSM :", len(troncons))
-        st.write(
-            "Nombre de rues dans les données de stationnement :",
-            len([k for k in places_rues if not k.startswith("__")])
-            if isinstance(places_rues, dict)
-            else 0,
-        )
-        st.write("Nombre de géométries reconnues pour la rue principale :", len(geometries_rue_principale))
-        if erreur_troncons:
-            st.error(f"Erreur OSMnx : {erreur_troncons}")
-        if isinstance(places_rues, dict) and "__erreur__" in places_rues:
-            st.error(f"Erreur Open Data : {places_rues['__erreur__']}")
+folium.Marker(
+    [lat, lon],
+    tooltip=geo["adresse"],
+    popup=folium.Popup(f"<b>{geo['adresse']}</b>", max_width=300),
+    icon=folium.Icon(color="blue", icon="info-sign"),
+).add_to(carte)
+folium.LayerControl(collapsed=True).add_to(carte)
+
+st.subheader(f"📍 {geo['adresse']}")
+st_folium(carte, height=650, use_container_width=True, returned_objects=[], key="carte_slot")
+st.markdown(
+    "<span style='color:#27ae60'>■</span> plus de 3 places libres estimées &nbsp; "
+    "<span style='color:#f39c12'>■</span> 2 ou 3 &nbsp; "
+    "<span style='color:#e74c3c'>■</span> 0 ou 1 &nbsp; "
+    "<span style='color:#7f8c8d'>■</span> estimation indisponible &nbsp; "
+    "— contour noir : rue recherchée ; traits gris : rues OSM sans emprise de stationnement.",
+    unsafe_allow_html=True,
+)
+if nb_formes == 0:
+    st.warning(
+        "Aucune emprise de stationnement n'a pu être dessinée dans ce rayon. "
+        "Voir les diagnostics ci-dessous : la carte n'est pas complète."
+    )
+
+
+# ============================================================
+# 6. RÉSULTATS
+# ============================================================
+st.markdown("### Résultat")
+c1, c2, c3 = st.columns(3)
+c1.metric("Arrondissement", f"{arrdt}ᵉ")
+c2.metric("Météo", f"{mto}, {temperature:.0f} °C")
+c3.metric("Heure", datetime.now(core._tz_paris()).strftime("%H:%M"))
+if err_meteo:
+    st.caption("⚠️ " + err_meteo)
+
+if res_od["methode"] is None:
+    st.error("Les données de stationnement de Paris Open Data n'ont pas pu être récupérées. "
+             "Aucune estimation n'est possible pour l'instant.")
+elif rue_principale is None:
+    st.warning(
+        f"Aucune emprise de stationnement voiture n'a été trouvée pour **{geo['rue']}** dans un rayon de "
+        f"{recherche['rayon']} m. Cela peut signifier qu'il n'y a pas de place autorisée sur cette rue, "
+        "ou que la donnée de la Ville est incomplète."
+    )
+elif pred_principale:
+    st.success(
+        f"**{geo['rue']}** : environ **{pred_principale.libres} place(s) libre(s)** sur "
+        f"{rue_principale['places']} place(s) recensée(s) dans un rayon de {recherche['rayon']} m "
+        f"(occupation estimée {pred_principale.occupation:.0%})."
+    )
+    if not pred_principale.rue_connue:
         st.caption(
-            "La couche grise signifie que les données de stationnement n'ont "
-            "pas permis de calculer une estimation pour cette rue."
+            "ℹ️ Le modèle a été entraîné sur 3 rues seulement (Voltaire, Menat, Commandant L…). "
+            "Pour cette rue, l'estimation repose sur l'heure, le jour, la météo et le nombre de places, "
+            "pas sur l'historique propre à la rue."
         )
 else:
-    st.info("Saisis une adresse parisienne pour afficher la carte.")
+    st.warning(f"{rue_principale['places']} place(s) recensée(s) pour {geo['rue']}, "
+               "mais l'estimation IA n'est pas disponible.")
+
+if predictions:
+    st.markdown("#### Rues voisines")
+    tableau = sorted(
+        ({"Rue": rues[c]["label"], "Places recensées": p.places, "Libres estimées": p.libres,
+          "Occupation estimée": f"{p.occupation:.0%}", "Rue connue du modèle": "oui" if p.rue_connue else "non"}
+         for c, p in predictions.items()),
+        key=lambda d: -d["Libres estimées"],
+    )
+    st.dataframe(tableau, use_container_width=True, hide_index=True)
+
+
+# ============================================================
+# 7. DIAGNOSTICS
+# ============================================================
+with st.expander("Diagnostics"):
+    st.write(f"**Adresse géocodée :** {geo['adresse']} (score {geo.get('score')}) — rue : {geo['rue']}")
+    st.write(f"**Coordonnées :** {lat}, {lon} — arrondissement {arrdt}")
+
+    st.write("**Paris Open Data (emprises de stationnement)**")
+    st.write(
+        f"- méthode de filtre : {res_od['methode'] or 'échec'} ; enregistrements récupérés : "
+        f"{res_od['recuperes']} / total serveur : {res_od['total_serveur']}"
+    )
+    st.write(f"- emprises lues : {len(res_od['emprises'])} ; rues avec places voiture : {len(rues)}")
+    if res_od["tronque"]:
+        st.warning("Résultats tronqués : toutes les emprises n'ont pas été téléchargées.")
+    for e in res_od["erreurs"]:
+        st.caption(f"Erreur Open Data : {e}")
+    inconnues = sum(r["places_inconnues"] for r in rues.values())
+    if inconnues:
+        st.caption(f"{inconnues} emprise(s) sans nombre de places renseigné (non comptées comme 0).")
+
+    st.write("**OpenStreetMap / Overpass**")
+    if not recherche["osm"]:
+        st.write("- désactivé")
+    else:
+        st.write(f"- tronçons de rues récupérés : {len(troncons_osm)}")
+        for e in erreurs_osm:
+            st.caption(f"Erreur Overpass : {e}")
+        if not troncons_osm:
+            st.caption("Le tracé gris des rues est absent ; les emprises de stationnement restent affichées.")
+
+    st.write("**Modèle IA**")
+    if erreur_modele:
+        st.write(f"- non chargé : {erreur_modele}")
+    else:
+        st.write(f"- rues apprises : {', '.join(modele.rues_apprises) or 'inconnues'}")
+        st.write(f"- prédictions calculées : {len(predictions)}")
+        st.write(
+            f"- entrées fixes faute de source temps réel : TRAFIC = {core.TRAFIC_DEFAUT}, "
+            f"% PARKING OC = {core.PARKING_OC_DEFAUT}"
+        )
+        alertes = [a for p in predictions.values() for a in p.alertes]
+        hors_plage = [rues[c]["label"] for c, p in predictions.items() if p.hors_plage_places]
+        if hors_plage:
+            st.caption("Nombre de places hors de la plage vue à l'entraînement pour : " + ", ".join(hors_plage))
+        for a in alertes:
+            st.caption(a)
+    if erreur_ia:
+        st.error(f"Erreur de prédiction IA : {erreur_ia}")

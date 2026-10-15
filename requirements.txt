@@ -1,14 +1,14 @@
-streamlit
-requests
-pandas
-numpy<2.0.0
+# SLOT 2.0 — à utiliser avec Python 3.12 (Streamlit Cloud > Advanced settings).
+streamlit>=1.36,<2
+streamlit-folium>=0.22
+folium>=0.17
+requests>=2.31
+tzdata
 joblib
-lightgbm
-pytz
+# Versions alignées sur les fichiers .pkl du dépôt :
+# le préprocesseur a été enregistré avec scikit-learn 1.5.x (ne pas changer),
+# le modèle avec LightGBM 4.x.
 scikit-learn==1.5.2
-streamlit-js-eval
-gspread
-google-auth
-folium
-streamlit-folium
-osmnx
+lightgbm>=4.0,<5
+numpy<2.0.0
+pandas>=2.0,<3
