@@ -204,26 +204,39 @@ def couleur_rue(cle):
     return core.couleur_pour_places(None) if cle in rues else COULEUR_SANS_DONNEE
 
 
-# Rues coloriées d'un seul tenant : chaque tronçon OSM prend la couleur de sa rue.
-cles_tracees = {t["cle"] for t in troncons_osm if t["cle"] in rues}
+# Rues coloriées d'un seul tenant, en trait continu et épais.
+# Tracé utilisé, par ordre de préférence :
+#   1. tronçons OpenStreetMap (si Overpass a répondu) ;
+#   2. axe reconstruit à partir des emprises de la Ville (toujours disponible) ;
+#   3. à défaut (place, carrefour), les emprises elles-mêmes.
+traces = [(t["cle"], t["nom"], t["coords"]) for t in troncons_osm]
+cles_tracees = {cle for cle, _, _ in traces if cle in rues}
+for cle, rue in rues.items():
+    if cle not in cles_tracees:
+        axe = core.axe_rue(rue["emprises"])
+        if axe:
+            traces.append((cle, rue["label"], axe))
+            cles_tracees.add(cle)
 nb_formes = 0
 
 couche_rues = folium.FeatureGroup(name="Rues (estimation IA)", show=True)
 # Les rues sans stationnement d'abord (en dessous), la rue recherchée en dernier (au-dessus).
-for t in sorted(troncons_osm, key=lambda t: (t["cle"] in rues, t["cle"] == cle_principale)):
-    cle = t["cle"]
-    info = folium.Tooltip(info_rue(cle, t["nom"]))
+for cle, nom, coords in sorted(traces, key=lambda t: (t[0] in rues, t[0] == cle_principale)):
+    avec_donnees = cle in rues
     if cle == cle_principale:
         # Liseré noir sous le trait coloré : la rue ressort sans perdre sa couleur.
-        folium.PolyLine(t["coords"], color="#111111", weight=14, opacity=0.9).add_to(couche_rues)
-    avec_donnees = cle in rues
+        folium.PolyLine(coords, color="#111111", weight=16, opacity=0.9, line_cap="round").add_to(couche_rues)
+    elif avec_donnees:
+        # Liseré blanc : le trait reste lisible sur le fond de carte.
+        folium.PolyLine(coords, color="#ffffff", weight=13, opacity=0.9, line_cap="round").add_to(couche_rues)
     folium.PolyLine(
-        t["coords"],
+        coords,
         color=couleur_rue(cle),
-        weight=9 if avec_donnees else 3,
-        opacity=0.95 if avec_donnees else 0.6,
+        weight=10 if avec_donnees else 3,
+        opacity=1.0 if avec_donnees else 0.6,
         line_cap="round",
-        tooltip=info,
+        line_join="round",
+        tooltip=folium.Tooltip(info_rue(cle, nom)),
     ).add_to(couche_rues)
     nb_formes += 1 if avec_donnees else 0
 

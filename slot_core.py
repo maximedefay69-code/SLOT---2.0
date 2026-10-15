@@ -450,6 +450,65 @@ def agreger_par_rue(emprises, filtre_regime=True):
 
 
 # ============================================================
+# Axe d'une rue reconstruit à partir de ses emprises
+# ============================================================
+def axe_rue(emprises, pas_m=25.0, largeur_max_m=45.0):
+    """
+    Reconstruit le tracé continu d'une rue à partir de ses emprises de
+    stationnement (morceaux des deux côtés), sans service externe.
+
+    Méthode : tous les sommets des polygones sont projetés en mètres, on
+    calcule l'axe principal (ACP), on découpe la rue en tranches de `pas_m`
+    le long de cet axe et on prend le point moyen de chaque tranche : la
+    ligne passe au milieu de la chaussée, d'un bout à l'autre.
+
+    Retourne [[lat, lon], ...] ou [] si la forme n'est pas celle d'une rue
+    (place, carrefour : dispersion latérale > `largeur_max_m`) ou si les
+    points sont insuffisants.
+    """
+    points = []
+    for e in emprises:
+        for _, coords in e.get("geometries") or []:
+            points.extend(coords)
+        if not e.get("geometries") and e.get("point"):
+            points.append(list(e["point"]))
+    if len(points) < 2:
+        return []
+
+    pts = np.asarray(points, dtype=float)
+    lat0, lon0 = pts[:, 0].mean(), pts[:, 1].mean()
+    k = math.cos(math.radians(lat0))
+    xy = np.column_stack(((pts[:, 1] - lon0) * 111320.0 * k, (pts[:, 0] - lat0) * 110540.0))
+
+    centre = xy.mean(axis=0)
+    _, _, vt = np.linalg.svd(xy - centre, full_matrices=False)
+    axe, normale = vt[0], np.array([-vt[0][1], vt[0][0]])
+    t = (xy - centre) @ axe
+    lateral = (xy - centre) @ normale
+    if t.max() - t.min() < 10.0:
+        return []  # trop court pour être lisible comme une rue
+
+    # Ligne médiane lissée : position latérale ajustée sur TOUS les points
+    # (degré 2 pour suivre une rue légèrement courbe). Contrairement à une
+    # moyenne par tranche, elle ne zigzague pas quand les morceaux des deux
+    # trottoirs sont décalés.
+    longueur = t.max() - t.min()
+    degre = 2 if longueur > 120 else 1
+    poly = np.polyfit(t, lateral, degre)
+    residus = lateral - np.polyval(poly, t)
+    # Points trop loin de la ligne : place ou carrefour, pas une rue.
+    if np.abs(residus).max() > largeur_max_m / 2 + 8:
+        return []
+
+    n = max(2, int(math.ceil(longueur / pas_m)) + 1)
+    trace = []
+    for ti in np.linspace(t.min(), t.max(), n):
+        x, y = centre + ti * axe + np.polyval(poly, ti) * normale
+        trace.append([float(lat0 + y / 110540.0), float(lon0 + x / (111320.0 * k))])
+    return trace
+
+
+# ============================================================
 # Overpass (facultatif) : tracé des rues voisines
 # ============================================================
 HIGHWAYS_ROUTES = (
