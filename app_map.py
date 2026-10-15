@@ -12,7 +12,16 @@ import joblib
 import streamlit as st
 from streamlit_folium import st_folium
 
+import importlib
+
 import slot_core as core
+
+# Streamlit Cloud relance app_map.py après une mise à jour sur GitHub, mais peut garder
+# l'ancien slot_core.py en mémoire (d'où des AttributeError). On le recharge si le fichier
+# sur disque est plus récent que la version en mémoire (ou si celle-ci est une ancienne
+# version sans date de chargement).
+if getattr(core, "_MTIME_CHARGE", None) != os.path.getmtime(core.__file__):
+    core = importlib.reload(core)
 
 st.set_page_config(page_title="SLOT 2.0 - Radar de stationnement", layout="wide")
 

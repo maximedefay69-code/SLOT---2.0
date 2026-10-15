@@ -17,6 +17,7 @@ Sources de données :
 from __future__ import annotations
 
 import json
+import os
 import math
 import re
 import time
@@ -84,6 +85,11 @@ TYPES_VOIE = {
     "promenade", "carrefour", "porte", "hameau", "cour", "ruelle",
 }
 ARTICLES = ("de la ", "de l ", "du ", "des ", "de ", "d ", "la ", "le ", "les ", "l ")
+
+
+# Date du fichier au moment du chargement : permet à app_map.py de détecter
+# qu'une version plus récente a été déployée et de recharger ce module.
+_MTIME_CHARGE = os.path.getmtime(__file__)
 
 
 class ApiError(Exception):
