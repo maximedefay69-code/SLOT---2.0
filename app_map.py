@@ -175,8 +175,9 @@ pred_principale = predictions.get(cle_principale)
 # 5. CARTE
 # ============================================================
 carte = folium.Map(location=[lat, lon], zoom_start=17, tiles=None, control_scale=True)
-folium.TileLayer("OpenStreetMap", name="Plan OpenStreetMap").add_to(carte)
-folium.TileLayer("CartoDB positron", name="Plan clair (CARTO)").add_to(carte)
+# Fond OpenStreetMap seul : accessible sans clé API (CARTO en exige une désormais).
+# Légèrement atténué pour faire ressortir les couleurs du stationnement.
+folium.TileLayer("OpenStreetMap", name="Plan OpenStreetMap", opacity=0.75).add_to(carte)
 
 couche_osm = folium.FeatureGroup(name="Rues (OpenStreetMap)", show=True)
 for t in troncons_osm:
