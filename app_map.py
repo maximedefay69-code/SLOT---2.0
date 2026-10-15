@@ -13,10 +13,13 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 # Serveurs Overpass alternatifs
-ox.settings.overpass_url = "https://overpass.kumi.systems/api"
+
+# Serveur Overpass alternatif
+ox.settings.overpass_url = "https://api.mapsource.io"
 ox.settings.timeout = 60
 ox.settings.requests_timeout = 30
 ox.settings.use_cache = True
+
 
 
 # ============================================================
