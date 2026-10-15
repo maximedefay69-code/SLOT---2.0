@@ -540,11 +540,54 @@ def _secondes(valeur):
     return int(round(float(str(valeur).rstrip("s"))))
 
 
+# Directions essayées pour le point d'arrivée : celle de l'app d'origine (nord-est)
+# d'abord, puis les trois autres si Google ne trouve pas de route (parc, voies ferrées…).
+DIRECTIONS_TRAJET = [(1, 1), (-1, -1), (1, -1), (-1, 1)]
+
+
+class _PasDeTrajet(ApiError):
+    """Pas de route vers ce point d'arrivée : on essaie une autre direction."""
+
+
+def _mesure_distance_matrix(s, lat, lon, dlat, dlon, cle_api, timeout):
+    r = s.get(API_DISTANCE_MATRIX, params={
+        "origins": f"{lat:.6f},{lon:.6f}", "destinations": f"{dlat:.6f},{dlon:.6f}",
+        "departure_time": "now", "traffic_model": "best_guess", "key": cle_api,
+    }, timeout=timeout)
+    d = lire_json(r, "Google Distance Matrix")
+    if d.get("status") != "OK":  # clé refusée, quota, API non activée : inutile d'insister
+        raise ApiError(f"Google Distance Matrix : {d.get('status')} {str(d.get('error_message', ''))[:150]}".strip())
+    el = d["rows"][0]["elements"][0]
+    if el.get("status") != "OK" or "duration_in_traffic" not in el:
+        raise _PasDeTrajet(f"Google Distance Matrix : pas de trajet ({el.get('status')}).")
+    return int(el["duration_in_traffic"]["value"]) - int(el["duration"]["value"])
+
+
+def _mesure_routes(s, lat, lon, dlat, dlon, cle_api, timeout):
+    corps = {
+        "origin": {"location": {"latLng": {"latitude": lat, "longitude": lon}}},
+        "destination": {"location": {"latLng": {"latitude": dlat, "longitude": dlon}}},
+        "travelMode": "DRIVE", "routingPreference": "TRAFFIC_AWARE",
+    }
+    r = s.post(API_ROUTES, json=corps, timeout=timeout, headers={
+        "X-Goog-Api-Key": cle_api, "X-Goog-FieldMask": "routes.duration,routes.staticDuration",
+        "Content-Type": "application/json",
+    })
+    d = lire_json(r, "Google Routes")  # HTTP 403 (API non activée) -> ApiError : on arrête
+    route = (d.get("routes") or [None])[0]
+    if not route or "duration" not in route or "staticDuration" not in route:
+        raise _PasDeTrajet("Google Routes : pas de trajet.")
+    return _secondes(route["duration"]) - _secondes(route["staticDuration"])
+
+
 def obtenir_trafic(lat, lon, cle_api, session=None, timeout=6):
     """
     Mesure le trafic autour de l'adresse avec Google Maps.
     1) API Distance Matrix (celle de l'app d'origine) ;
     2) à défaut, Routes API (son remplaçant chez Google).
+    Pour chaque API, si aucun trajet n'est trouvé vers le point d'arrivée,
+    on essaie les autres directions ; une erreur de compte (clé refusée,
+    API non activée, quota) arrête aussitôt cette API.
     Retourne un dict : score (0 / 0,5 / 1 ou None), ecart_s, source, erreur.
     La clé n'apparaît jamais dans les messages d'erreur.
     """
@@ -552,55 +595,26 @@ def obtenir_trafic(lat, lon, cle_api, session=None, timeout=6):
         return {"score": None, "ecart_s": None, "source": None,
                 "erreur": "Clé GOOGLE_MAPS_API_KEY absente des secrets."}
     s = _session(session)
-    dest_lat, dest_lon = lat + DECALAGE_TRAJET_DEG, lon + DECALAGE_TRAJET_DEG
     erreurs = []
-
-    # 1) Distance Matrix (legacy)
-    try:
-        r = s.get(API_DISTANCE_MATRIX, params={
-            "origins": f"{lat:.6f},{lon:.6f}", "destinations": f"{dest_lat:.6f},{dest_lon:.6f}",
-            "departure_time": "now", "traffic_model": "best_guess", "key": cle_api,
-        }, timeout=timeout)
-        d = lire_json(r, "Google Distance Matrix")
-        if d.get("status") != "OK":
-            raise ApiError(f"Google Distance Matrix : {d.get('status')} {str(d.get('error_message', ''))[:150]}")
-        el = d["rows"][0]["elements"][0]
-        if el.get("status") != "OK" or "duration_in_traffic" not in el:
-            raise ApiError(f"Google Distance Matrix : élément {el.get('status')}, pas de durée avec trafic.")
-        ecart = int(el["duration_in_traffic"]["value"]) - int(el["duration"]["value"])
-        return {"score": score_trafic(ecart), "ecart_s": ecart, "source": "Distance Matrix", "erreur": None}
-    except ApiError as e:
-        erreurs.append(str(e))
-    except requests.RequestException as e:
-        erreurs.append(f"Google Distance Matrix injoignable : {type(e).__name__}")  # pas d'URL (contient la clé)
-    except (KeyError, IndexError, TypeError, ValueError):
-        erreurs.append("Google Distance Matrix : réponse inattendue.")
-
-    # 2) Routes API
-    try:
-        corps = {
-            "origin": {"location": {"latLng": {"latitude": lat, "longitude": lon}}},
-            "destination": {"location": {"latLng": {"latitude": dest_lat, "longitude": dest_lon}}},
-            "travelMode": "DRIVE", "routingPreference": "TRAFFIC_AWARE",
-        }
-        r = s.post(API_ROUTES, json=corps, timeout=timeout, headers={
-            "X-Goog-Api-Key": cle_api, "X-Goog-FieldMask": "routes.duration,routes.staticDuration",
-            "Content-Type": "application/json",
-        })
-        d = lire_json(r, "Google Routes")
-        route = (d.get("routes") or [None])[0]
-        if not route or "duration" not in route or "staticDuration" not in route:
-            raise ApiError("Google Routes : aucune durée renvoyée.")
-        ecart = _secondes(route["duration"]) - _secondes(route["staticDuration"])
-        return {"score": score_trafic(ecart), "ecart_s": ecart, "source": "Routes API", "erreur": None}
-    except ApiError as e:
-        erreurs.append(str(e))
-    except requests.RequestException as e:
-        erreurs.append(f"Google Routes injoignable : {type(e).__name__}")
-    except (KeyError, IndexError, TypeError, ValueError):
-        erreurs.append("Google Routes : réponse inattendue.")
-
-    return {"score": None, "ecart_s": None, "source": None, "erreur": " | ".join(erreurs)}
+    for nom, mesure in (("Distance Matrix", _mesure_distance_matrix), ("Routes API", _mesure_routes)):
+        for sens_lat, sens_lon in DIRECTIONS_TRAJET:
+            dlat = lat + sens_lat * DECALAGE_TRAJET_DEG
+            dlon = lon + sens_lon * DECALAGE_TRAJET_DEG
+            try:
+                ecart = mesure(s, lat, lon, dlat, dlon, cle_api, timeout)
+                return {"score": score_trafic(ecart), "ecart_s": ecart, "source": nom, "erreur": None}
+            except _PasDeTrajet as e:
+                erreurs.append(str(e))
+                continue
+            except ApiError as e:
+                erreurs.append(str(e))
+            except requests.RequestException as e:
+                erreurs.append(f"Google {nom} injoignable : {type(e).__name__}")  # pas d'URL (contient la clé)
+            except (KeyError, IndexError, TypeError, ValueError):
+                erreurs.append(f"Google {nom} : réponse inattendue.")
+            break  # erreur de compte ou de réseau : inutile d'essayer d'autres directions
+    # Dédoublonne les messages identiques (même erreur sur plusieurs directions).
+    return {"score": None, "ecart_s": None, "source": None, "erreur": " | ".join(dict.fromkeys(erreurs))}
 
 
 # ============================================================
@@ -819,6 +833,28 @@ class ModeleSlot:
 def _tz_paris():
     from zoneinfo import ZoneInfo  # bibliothèque standard (remplace pytz)
     return ZoneInfo("Europe/Paris")
+
+
+# Règle de couleur (à ajuster ici) :
+#   rouge  : occupation prédite > 85 %  ET  moins de 3 places libres estimées
+#   vert   : occupation prédite < 75 %  ET  au moins 3 places libres estimées
+#   orange : tous les autres cas
+SEUIL_ROUGE_OCCUPATION = 0.85
+SEUIL_VERT_OCCUPATION = 0.75
+SEUIL_PLACES_LIBRES = 3
+
+ROUGE, ORANGE, VERT, GRIS = "#e74c3c", "#f39c12", "#27ae60", "#7f8c8d"
+
+
+def couleur_pour_prediction(occupation, libres):
+    """Couleur d'une rue à partir du taux d'occupation prédit et des places libres estimées."""
+    if occupation is None or libres is None:
+        return GRIS
+    if occupation > SEUIL_ROUGE_OCCUPATION and libres < SEUIL_PLACES_LIBRES:
+        return ROUGE
+    if occupation < SEUIL_VERT_OCCUPATION and libres >= SEUIL_PLACES_LIBRES:
+        return VERT
+    return ORANGE
 
 
 def couleur_pour_places(libres):

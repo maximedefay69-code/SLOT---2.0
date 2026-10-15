@@ -278,7 +278,7 @@ def info_rue(cle, nom_defaut):
 def couleur_rue(cle):
     pred = predictions.get(cle)
     if pred:
-        return core.couleur_pour_places(pred.libres)
+        return core.couleur_pour_prediction(pred.occupation, pred.libres)
     return core.couleur_pour_places(None) if cle in rues else COULEUR_SANS_DONNEE
 
 
@@ -359,9 +359,11 @@ folium.LayerControl(collapsed=True).add_to(carte)
 st.subheader(f"📍 {geo['adresse']}")
 st_folium(carte, height=650, use_container_width=True, returned_objects=[], key="carte_slot")
 st.markdown(
-    "<span style='color:#27ae60'>■</span> plus de 3 places libres estimées &nbsp; "
-    "<span style='color:#f39c12'>■</span> 2 ou 3 &nbsp; "
-    "<span style='color:#e74c3c'>■</span> 0 ou 1 &nbsp; "
+    f"<span style='color:{core.VERT}'>■</span> occupation < {core.SEUIL_VERT_OCCUPATION:.0%} "
+    f"et au moins {core.SEUIL_PLACES_LIBRES} places libres &nbsp; "
+    f"<span style='color:{core.ROUGE}'>■</span> occupation > {core.SEUIL_ROUGE_OCCUPATION:.0%} "
+    f"et moins de {core.SEUIL_PLACES_LIBRES} places libres &nbsp; "
+    f"<span style='color:{core.ORANGE}'>■</span> autres cas &nbsp; "
     "<span style='color:#7f8c8d'>■</span> estimation indisponible &nbsp; "
     "— liseré noir : rue recherchée ; traits gris fins : rues sans stationnement voiture recensé. "
     "Le détail des emplacements de la Ville s'active via le sélecteur de couches (en haut à droite).",
