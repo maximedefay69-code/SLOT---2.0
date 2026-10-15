@@ -174,10 +174,32 @@ pred_principale = predictions.get(cle_principale)
 # ============================================================
 # 5. CARTE
 # ============================================================
-carte = folium.Map(location=[lat, lon], zoom_start=17, tiles=None, control_scale=True)
-# Fond OpenStreetMap seul : accessible sans clé API (CARTO en exige une désormais).
-# Légèrement atténué pour faire ressortir les couleurs du stationnement.
-folium.TileLayer("OpenStreetMap", name="Plan OpenStreetMap", opacity=0.75).add_to(carte)
+carte = folium.Map(location=[lat, lon], zoom_start=17, max_zoom=19, tiles=None, control_scale=True)
+
+# Fonds de carte épurés, sans clé API (CARTO, Stadia, Mapbox en exigent une).
+ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/{}/MapServer/tile/{{z}}/{{y}}/{{x}}"
+ATTRIBUTION_ESRI = "Fond © Esri, HERE, Garmin, © contributeurs OpenStreetMap"
+
+# Secours : OpenStreetMap passé en gris clair par un filtre CSS (le fond OSM est vérifié).
+folium.TileLayer("OpenStreetMap", name="Plan OpenStreetMap épuré (gris)", max_zoom=19, show=False).add_to(carte)
+carte.get_root().header.add_child(folium.Element(
+    "<style>img.leaflet-tile[src*='tile.openstreetmap.org']"
+    "{filter:grayscale(1) brightness(1.12) contrast(.78) opacity(.85);}</style>"
+))
+# Par défaut (ajouté en dernier) : Esri Light Gray Canvas, très épuré.
+# Ses tuiles existent jusqu'au zoom 16 ; au-delà, Leaflet les agrandit (max_native_zoom).
+folium.TileLayer(
+    tiles=ESRI.format("World_Light_Gray_Base"), attr=ATTRIBUTION_ESRI,
+    name="Plan épuré (gris clair)", max_native_zoom=16, max_zoom=19, show=True,
+).add_to(carte)
+# Noms de rues AU-DESSUS des traits colorés (calque dédié qui laisse passer les clics),
+# pour qu'ils restent lisibles sur les rues coloriées.
+folium.map.CustomPane("noms_rues", z_index=650, pointer_events=False).add_to(carte)
+folium.TileLayer(
+    tiles=ESRI.format("World_Light_Gray_Reference"), attr=ATTRIBUTION_ESRI,
+    name="Noms des rues", overlay=True, control=True, max_native_zoom=16, max_zoom=19,
+    pane="noms_rues",
+).add_to(carte)
 
 COULEUR_SANS_DONNEE = "#9aa0a6"
 
