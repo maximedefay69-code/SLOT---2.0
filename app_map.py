@@ -179,50 +179,83 @@ carte = folium.Map(location=[lat, lon], zoom_start=17, tiles=None, control_scale
 # Légèrement atténué pour faire ressortir les couleurs du stationnement.
 folium.TileLayer("OpenStreetMap", name="Plan OpenStreetMap", opacity=0.75).add_to(carte)
 
-couche_osm = folium.FeatureGroup(name="Rues (OpenStreetMap)", show=True)
-for t in troncons_osm:
-    principale = t["cle"] == cle_principale
+COULEUR_SANS_DONNEE = "#9aa0a6"
+
+
+def info_rue(cle, nom_defaut):
+    """Texte d'infobulle d'une rue (identique pour tous ses tronçons et emprises)."""
+    rue, pred = rues.get(cle), predictions.get(cle)
+    titre = f"<b>{rue['label'] if rue else nom_defaut}</b>" + (" (rue recherchée)" if cle == cle_principale else "")
+    if pred:
+        texte = (f"{titre}<br>{pred.libres} place(s) libre(s) estimée(s) sur {rue['places']} recensée(s) "
+                 f"dans le rayon<br>Occupation estimée : {pred.occupation:.0%}")
+        if not pred.rue_connue:
+            texte += "<br><i>Rue absente de l'entraînement : estimation générique.</i>"
+        return texte
+    if rue:
+        return f"{titre}<br>{rue['places']} place(s) recensée(s) — estimation indisponible"
+    return f"{titre}<br>Aucun stationnement voiture recensé dans le rayon"
+
+
+def couleur_rue(cle):
+    pred = predictions.get(cle)
+    if pred:
+        return core.couleur_pour_places(pred.libres)
+    return core.couleur_pour_places(None) if cle in rues else COULEUR_SANS_DONNEE
+
+
+# Rues coloriées d'un seul tenant : chaque tronçon OSM prend la couleur de sa rue.
+cles_tracees = {t["cle"] for t in troncons_osm if t["cle"] in rues}
+nb_formes = 0
+
+couche_rues = folium.FeatureGroup(name="Rues (estimation IA)", show=True)
+# Les rues sans stationnement d'abord (en dessous), la rue recherchée en dernier (au-dessus).
+for t in sorted(troncons_osm, key=lambda t: (t["cle"] in rues, t["cle"] == cle_principale)):
+    cle = t["cle"]
+    info = folium.Tooltip(info_rue(cle, t["nom"]))
+    if cle == cle_principale:
+        # Liseré noir sous le trait coloré : la rue ressort sans perdre sa couleur.
+        folium.PolyLine(t["coords"], color="#111111", weight=14, opacity=0.9).add_to(couche_rues)
+    avec_donnees = cle in rues
     folium.PolyLine(
         t["coords"],
-        color="#1f4e79" if principale else "#9aa0a6",
-        weight=6 if principale else 3,
-        opacity=0.8 if principale else 0.6,
-        tooltip=t["nom"] + (" (rue recherchée)" if principale else ""),
-    ).add_to(couche_osm)
-couche_osm.add_to(carte)
+        color=couleur_rue(cle),
+        weight=9 if avec_donnees else 3,
+        opacity=0.95 if avec_donnees else 0.6,
+        line_cap="round",
+        tooltip=info,
+    ).add_to(couche_rues)
+    nb_formes += 1 if avec_donnees else 0
 
-couche_places = folium.FeatureGroup(name="Stationnement (estimation IA)", show=True)
-nb_formes = 0
+# Emprises de stationnement (les morceaux de la Ville de Paris) :
+# - rue déjà tracée en entier -> couche « détail », masquée par défaut ;
+# - rue sans tracé OSM (ou Overpass indisponible) -> affichées, pour ne rien perdre.
+couche_detail = folium.FeatureGroup(name="Détail des emplacements (Ville de Paris)", show=False)
+couche_seules = folium.FeatureGroup(name="Stationnement sans tracé de rue", show=True)
 for cle, rue in rues.items():
-    pred = predictions.get(cle)
-    couleur = core.couleur_pour_places(pred.libres if pred else None)
-    principale = cle == cle_principale
-    if pred:
-        info = (f"<b>{rue['label']}</b>{' (rue recherchée)' if principale else ''}<br>"
-                f"{pred.libres} place(s) libre(s) estimée(s) sur {rue['places']} recensée(s) "
-                f"dans le rayon<br>Occupation estimée : {pred.occupation:.0%}")
-        if not pred.rue_connue:
-            info += "<br><i>Rue absente de l'entraînement : estimation générique.</i>"
-    else:
-        info = f"<b>{rue['label']}</b><br>{rue['places']} place(s) recensée(s) — estimation indisponible"
+    couleur = couleur_rue(cle)
+    cible = couche_detail if cle in cles_tracees else couche_seules
+    info = info_rue(cle, rue["label"])
     for emprise in rue["emprises"]:
-        details = (f"{info}<br><small>Emprise : {emprise['regpri'].title() or 'régime inconnu'}, "
-                   f"{emprise['places'] if emprise['places'] is not None else '?'} place(s)</small>")
+        details = folium.Tooltip(
+            f"{info}<br><small>Emprise : {emprise['regpri'].title() or 'régime inconnu'}, "
+            f"{emprise['places'] if emprise['places'] is not None else '?'} place(s)</small>")
         for genre, coords in emprise["geometries"]:
-            options = dict(color="#111111" if principale else couleur, weight=3 if principale else 2,
-                           fill=True, fill_color=couleur, fill_opacity=0.75,
-                           tooltip=folium.Tooltip(details))
             if genre == "polygon":
-                folium.Polygon(coords, **options).add_to(couche_places)
+                folium.Polygon(coords, color=couleur, weight=2, fill=True, fill_color=couleur,
+                               fill_opacity=0.8, tooltip=details).add_to(cible)
             else:
-                folium.PolyLine(coords, color=couleur, weight=6, tooltip=folium.Tooltip(details)).add_to(couche_places)
-            nb_formes += 1
+                folium.PolyLine(coords, color=couleur, weight=6, tooltip=details).add_to(cible)
+            nb_formes += cible is couche_seules
         if not emprise["geometries"] and emprise["point"]:
             # Pas de polygone : on montre au moins le point de l'emprise.
             folium.CircleMarker(emprise["point"], radius=5, color=couleur, fill=True, fill_opacity=0.9,
-                                tooltip=folium.Tooltip(details)).add_to(couche_places)
-            nb_formes += 1
-couche_places.add_to(carte)
+                                tooltip=details).add_to(cible)
+            nb_formes += cible is couche_seules
+
+couche_detail.add_to(carte)
+couche_seules.add_to(carte)
+couche_rues.add_to(carte)
 
 folium.Marker(
     [lat, lon],
@@ -239,7 +272,8 @@ st.markdown(
     "<span style='color:#f39c12'>■</span> 2 ou 3 &nbsp; "
     "<span style='color:#e74c3c'>■</span> 0 ou 1 &nbsp; "
     "<span style='color:#7f8c8d'>■</span> estimation indisponible &nbsp; "
-    "— contour noir : rue recherchée ; traits gris : rues OSM sans emprise de stationnement.",
+    "— liseré noir : rue recherchée ; traits gris fins : rues sans stationnement voiture recensé. "
+    "Le détail des emplacements de la Ville s'active via le sélecteur de couches (en haut à droite).",
     unsafe_allow_html=True,
 )
 if nb_formes == 0:
