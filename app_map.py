@@ -17,8 +17,12 @@ import slot_core as core
 st.set_page_config(page_title="SLOT 2.0 - Radar de stationnement", layout="wide")
 
 DOSSIER = os.path.dirname(os.path.abspath(__file__))
-FICHIER_MODELE = os.path.join(DOSSIER, "modele_lightgbmDA.pkl")
-FICHIER_PREPRO = os.path.join(DOSSIER, "preprocessorDA.pkl")
+# Versions du modèle, par ordre de préférence : (nom affiché, modèle, préprocesseur).
+# Le modèle et son préprocesseur doivent TOUJOURS être de la même version.
+VERSIONS_MODELE = [
+    ("SLOT v2", "modele_SLOT_v2.pkl", "prepr_SLOT_v2.pkl"),
+    ("DA (ancienne version)", "modele_lightgbmDA.pkl", "preprocessorDA.pkl"),
+]
 FICHIER_LOGO = os.path.join(DOSSIER, "SLOT_img.png")
 
 
@@ -27,12 +31,19 @@ FICHIER_LOGO = os.path.join(DOSSIER, "SLOT_img.png")
 # ============================================================
 @st.cache_resource(show_spinner=False)
 def charger_modele():
-    try:
-        modele = joblib.load(FICHIER_MODELE)
-        prepro = joblib.load(FICHIER_PREPRO)
-        return core.ModeleSlot(modele, prepro), None
-    except Exception as e:  # fichier absent, version de bibliothèque incompatible...
-        return None, f"{type(e).__name__}: {e}"
+    """Charge la version la plus récente disponible ; signale les échecs."""
+    erreurs = []
+    for nom, f_modele, f_prepro in VERSIONS_MODELE:
+        try:
+            modele = joblib.load(os.path.join(DOSSIER, f_modele))
+            prepro = joblib.load(os.path.join(DOSSIER, f_prepro))
+            m = core.ModeleSlot(modele, prepro, version=nom)
+            if erreurs:
+                m.avertissement = "Version préférée indisponible : " + " | ".join(erreurs)
+            return m, None
+        except Exception as e:  # fichier absent, version de bibliothèque incompatible...
+            erreurs.append(f"{nom} : {type(e).__name__}: {e}")
+    return None, " | ".join(erreurs)
 
 
 # ============================================================
@@ -77,6 +88,7 @@ with col_titre:
 st.caption(
     "Estimation indicative des places libres par un modèle d'IA, à partir des "
     "places recensées par la Ville de Paris. Ce n'est pas un comptage en direct."
+    + (f" Modèle : {modele.version}." if modele else "")
 )
 
 if erreur_modele:
@@ -346,8 +358,8 @@ elif pred_principale:
     )
     if not pred_principale.rue_connue:
         st.caption(
-            "ℹ️ Le modèle a été entraîné sur 3 rues seulement (Voltaire, Menat, Commandant L…). "
-            "Pour cette rue, l'estimation repose sur l'heure, le jour, la météo et le nombre de places, "
+            f"ℹ️ Cette rue ne fait pas partie des {len(modele.rues_apprises)} rues observées pendant "
+            "l'entraînement. L'estimation repose sur l'heure, le jour, la météo et le nombre de places, "
             "pas sur l'historique propre à la rue."
         )
 else:
@@ -400,7 +412,11 @@ with st.expander("Diagnostics"):
     if erreur_modele:
         st.write(f"- non chargé : {erreur_modele}")
     else:
-        st.write(f"- rues apprises : {', '.join(modele.rues_apprises) or 'inconnues'}")
+        st.write(f"- version utilisée : **{modele.version}**")
+        if getattr(modele, "avertissement", None):
+            st.warning(modele.avertissement)
+        st.write(f"- rues apprises ({len(modele.rues_apprises)}) : "
+                 f"{', '.join(r.strip() for r in modele.rues_apprises) or 'inconnues'}")
         st.write(f"- prédictions calculées : {len(predictions)}")
         st.write(
             f"- entrées fixes faute de source temps réel : TRAFIC = {core.TRAFIC_DEFAUT}, "

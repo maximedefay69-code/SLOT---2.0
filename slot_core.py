@@ -597,29 +597,47 @@ class Prediction:
 
 class ModeleSlot:
     """
-    Enveloppe du modèle LightGBM + préprocesseur.
+    Enveloppe du modèle LightGBM + préprocesseur (versions DA, v1 et v2).
 
-    Vérifié sur les artefacts du dépôt :
-    - régression LightGBM, 23 variables après préprocesseur ;
+    Vérifié sur les artefacts (identiques pour les 3 versions sauf mention) :
+    - régression LightGBM (objectif L2, métrique de suivi L1), 200 arbres,
+      learning_rate 0,05, 31 feuilles, feature_fraction 0,8 ;
     - préprocesseur : StandardScaler sur 8 colonnes numériques +
       OneHotEncoder(handle_unknown="ignore") sur RUE, JOUR, MTO ;
-    - catégories RUE apprises : « Commandant L », « Menat », « Voltaire »
-      (sensibles à la casse) ;
-    - sortie observée ≈ 0,85–0,99 sur des entrées réalistes : taux d'occupation.
+    - v2 : 2 584 observations, 24 catégories RUE (sensibles à la casse,
+      ex. « Pelouze », « Moscou »), 43 variables en sortie ;
+    - cible : taux d'occupation (moyenne ≈ 0,86) ; la sortie peut dépasser 1
+      (jusqu'à ≈ 1,34 en théorie), d'où le bornage signalé.
     """
 
-    PLAGE_PLACES = (0, 69)  # moyenne 30,6 ± 3 écarts-types à l'entraînement
-
-    def __init__(self, modele, preprocesseur):
+    def __init__(self, modele, preprocesseur, version="?"):
         self.modele = modele
         self.prepro = preprocesseur
+        self.version = version
         self.colonnes = list(getattr(preprocesseur, "feature_names_in_", [])) or [
             "JOUR", "RUE", "VILLE", "TRAFIC", "% PARKING OC", "NBR PLACES",
             "REVENUS / H", "VEHICULES / H", "MTO", "TEMPERATURE", "HEURE_SIN", "HEURE_COS",
         ]
         self.rues_apprises = self._categories("RUE")
         self.mto_appris = self._categories("MTO")
-        self._index_rues = {cle_rue(r): r for r in self.rues_apprises}
+        # Index par clé normalisée. En cas de doublon (« Berne » / « Berne »
+        # avec espace final dans la v2), on garde la version sans espace parasite.
+        self._index_rues = {}
+        for r in sorted(self.rues_apprises, key=lambda c: c != c.strip()):
+            self._index_rues.setdefault(cle_rue(r), r)
+        self.PLAGE_PLACES = self._plage("NBR PLACES", defaut=(0, 69))
+
+    def _plage(self, colonne, defaut):
+        """Plage « vue à l'entraînement » : moyenne ± 3 écarts-types du scaler."""
+        try:
+            for _, tr, cols in self.prepro.transformers_:
+                if hasattr(tr, "mean_") and colonne in list(cols):
+                    i = list(cols).index(colonne)
+                    m, s = float(tr.mean_[i]), float(tr.scale_[i])
+                    return (max(0.0, m - 3 * s), m + 3 * s)
+        except Exception:
+            pass
+        return defaut
 
     def _categories(self, colonne):
         try:
@@ -639,8 +657,11 @@ class ModeleSlot:
         if cle in self._index_rues:
             return self._index_rues[cle]
         for cle_apprise, cat in self._index_rues.items():
-            # « Commandant L » (tronqué à l'entraînement) ~ « commandant lamy »
-            if cle_apprise and cle.startswith(cle_apprise):
+            # Uniquement pour un nom tronqué à l'entraînement (« Commandant L »
+            # ~ « commandant lamy »). Pas de préfixe libre : « italie » ne doit
+            # pas capturer « italiens ».
+            mots = cle_apprise.split()
+            if len(mots) >= 2 and len(mots[-1]) == 1 and cle.startswith(cle_apprise):
                 return cat
         return None
 
