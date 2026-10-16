@@ -4,7 +4,9 @@ SLOT 2.0 — Radar de stationnement (point d'entrée Streamlit).
 Lancer en local :  streamlit run app_map.py
 """
 
+import base64
 import os
+import time
 from datetime import datetime
 
 import folium
@@ -23,7 +25,9 @@ import slot_core as core
 if getattr(core, "_MTIME_CHARGE", None) != os.path.getmtime(core.__file__):
     core = importlib.reload(core)
 
-st.set_page_config(page_title="SLOT 2.0 - Radar de stationnement", layout="wide")
+_LOGO_ICONE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "SLOT_img.png")
+st.set_page_config(page_title="SLOT", page_icon=_LOGO_ICONE if os.path.exists(_LOGO_ICONE) else "🅿️",
+                   layout="wide", initial_sidebar_state="collapsed")
 
 DOSSIER = os.path.dirname(os.path.abspath(__file__))
 # Versions du modèle, par ordre de préférence : (nom affiché, modèle, préprocesseur).
@@ -120,62 +124,140 @@ def c_rues_osm(lat, lon, rayon):
     return core.recuperer_rues_osm(lat, lon, rayon)
 
 
+# ============================================================
+# 3. PARCOURS EN TROIS ÉCRANS : intro -> recherche -> résultats
+# ============================================================
+MARRON = "#603818"        # couleur du logo
+CREME = "#FBF7F2"
+DUREE_INTRO_S = 2.6
+SLOGAN = "Le Fast Food du stationnement"
+TYPES_VOIE = ["Rue", "Boulevard", "Avenue", "Place", "Quai", "Passage", "Impasse", "Allée", "Cours", "Square"]
+
+
+@st.cache_resource(show_spinner=False)
+def logo_base64():
+    try:
+        with open(FICHIER_LOGO, "rb") as f:
+            return base64.b64encode(f.read()).decode()
+    except OSError:
+        return None
+
+
+def aller_a(ecran):
+    st.session_state["ecran"] = ecran
+
+
+# Allure « application mobile » : sans en-tête ni pied de page Streamlit, marges réduites.
+st.markdown(f"""<style>
+header[data-testid="stHeader"], footer, #MainMenu {{ display: none !important; }}
+.block-container {{ padding-top: 1.2rem; padding-bottom: 2rem; }}
+.slot-entete {{ text-align: center; margin: .4rem 0 1.2rem; }}
+.slot-entete img {{ width: 64px; height: 64px; border-radius: 16px; }}
+.slot-entete .nom {{ font-size: 2rem; font-weight: 800; letter-spacing: .18em; color: {MARRON}; margin-top: .3rem; }}
+.slot-entete .slogan {{ color: #8a7a6c; font-size: .95rem; }}
+div[data-testid="stFormSubmitButton"] button {{ min-height: 3rem; font-size: 1.05rem; font-weight: 700; }}
+</style>""", unsafe_allow_html=True)
+
+ecran = st.session_state.setdefault("ecran", "intro")
+
+# ---------- Écran 1 : intro (une fois par ouverture de l'app) ----------
+if ecran == "intro":
+    img = logo_base64()
+    logo_html = f'<img src="data:image/png;base64,{img}" alt="SLOT">' if img else ""
+    zone = st.empty()
+    zone.markdown(f"""
+<style>
+.slot-intro {{ position: fixed; inset: 0; z-index: 1000000; background: {CREME};
+  display: flex; flex-direction: column; align-items: center; justify-content: center; }}
+.slot-intro img {{ width: 128px; height: 128px; border-radius: 30px;
+  box-shadow: 0 12px 30px rgba(96,56,24,.25); animation: slot-pop .7s cubic-bezier(.2,1.4,.4,1) both; }}
+.slot-intro .nom {{ margin-top: 22px; font-size: 3rem; font-weight: 800; letter-spacing: .25em;
+  padding-left: .25em; color: {MARRON}; animation: slot-monte .6s .25s both; }}
+.slot-intro .slogan {{ margin-top: 6px; color: #8a7a6c; font-size: 1.05rem; animation: slot-monte .6s .45s both; }}
+.slot-intro .piste {{ margin-top: 42px; width: 160px; height: 6px; border-radius: 3px;
+  background: #eadfd4; overflow: hidden; }}
+.slot-intro .barre {{ height: 100%; width: 0; border-radius: 3px; background: {MARRON};
+  animation: slot-charge {DUREE_INTRO_S - 0.2}s .3s ease-in-out forwards; }}
+@keyframes slot-pop {{ from {{ transform: scale(.6); opacity: 0; }} to {{ transform: scale(1); opacity: 1; }} }}
+@keyframes slot-monte {{ from {{ transform: translateY(12px); opacity: 0; }} to {{ transform: none; opacity: 1; }} }}
+@keyframes slot-charge {{ from {{ width: 0; }} to {{ width: 100%; }} }}
+</style>
+<div class="slot-intro">
+  {logo_html}
+  <div class="nom">SLOT</div>
+  <div class="slogan">{SLOGAN}</div>
+  <div class="piste"><div class="barre"></div></div>
+</div>""", unsafe_allow_html=True)
+    # Le vrai chargement (modèle IA) se fait pendant l'animation.
+    debut = time.monotonic()
+    charger_modele()
+    reste = DUREE_INTRO_S - (time.monotonic() - debut)
+    if reste > 0:
+        time.sleep(reste)
+    st.session_state["ecran"] = "recherche"
+    st.rerun()
+
 modele, erreur_modele = charger_modele()
 
 
-# ============================================================
-# 3. INTERFACE DE SAISIE (formulaire : aucune requête avant validation)
-# ============================================================
-col_logo, col_titre = st.columns([1, 12])
-with col_logo:
-    if os.path.exists(FICHIER_LOGO):
-        st.image(FICHIER_LOGO, width=64)
-with col_titre:
-    st.title("SLOT 2.0 — Radar de stationnement")
-st.caption(
-    "Estimation indicative des places libres par un modèle d'IA, à partir des "
-    "places recensées par la Ville de Paris. Ce n'est pas un comptage en direct."
-    + (f" Modèle : {modele.version}." if modele else "")
-)
+def entete_slot():
+    img = logo_base64()
+    logo_html = f'<img src="data:image/png;base64,{img}" alt="SLOT">' if img else ""
+    st.markdown(f'<div class="slot-entete">{logo_html}<div class="nom">SLOT</div>'
+                f'<div class="slogan">{SLOGAN}</div></div>', unsafe_allow_html=True)
 
-if erreur_modele:
-    st.error(
-        "Le modèle IA n'a pas pu être chargé : la carte affichera les places "
-        f"recensées, sans estimation. Détail : {erreur_modele}"
-    )
 
-with st.form("formulaire_adresse"):
-    c1, c2, c3, c4 = st.columns([1, 2, 4, 2])
-    with c1:
-        num_v = st.number_input("N°", min_value=1, max_value=999, value=6, step=1)
-    with c2:
-        type_v = st.selectbox(
-            "Type de voie",
-            ["Rue", "Boulevard", "Avenue", "Place", "Quai", "Passage", "Impasse", "Allée", "Cours", "Square"],
-        )
-    with c3:
-        nom_v = st.text_input("Nom de la voie", value="Pelouze")
-    with c4:
-        rayon = st.select_slider("Rayon (m)", options=[150, 250, 300, 400, 500], value=300)
-    c5, c6 = st.columns([2, 5])
-    with c5:
-        afficher_osm = st.checkbox(
-            "Tracer aussi les rues sans stationnement (OSM, plus lent)", value=False,
-            help="Ajoute en gris les rues sans place voiture recensée, via OpenStreetMap/Overpass "
-                 "(serveurs publics souvent saturés : jusqu'à 20 s d'attente). "
-                 "N'a aucun effet sur les estimations du modèle.",
-        )
-    lancer = st.form_submit_button("Rechercher", type="primary")
+# ---------- Écran 2 : recherche ----------
+if ecran == "recherche":
+    _, centre, _ = st.columns([1, 2, 1])  # colonne centrale sur ordinateur, pleine largeur sur téléphone
+    with centre:
+        entete_slot()
+        if erreur_modele:
+            st.error("Le modèle IA n'a pas pu être chargé : seules les places recensées seront affichées. "
+                     f"Détail : {erreur_modele}")
+        prec = st.session_state.get("derniere_recherche") or {}
+        with st.form("formulaire_adresse", border=False):
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                num_v = st.number_input("N°", min_value=1, max_value=999, value=int(prec.get("num", 6)), step=1)
+            with c2:
+                type_prec = prec.get("type", "Rue")
+                type_v = st.selectbox("Type de voie", TYPES_VOIE,
+                                      index=TYPES_VOIE.index(type_prec) if type_prec in TYPES_VOIE else 0)
+            nom_v = st.text_input("Nom de la voie", value=prec.get("nom", ""), placeholder="ex. Pelouze")
+            with st.expander("Options"):
+                rayon = st.select_slider("Rayon de recherche (m)", options=[150, 250, 300, 400, 500],
+                                         value=int(prec.get("rayon", 300)))
+                afficher_osm = st.checkbox(
+                    "Tracer aussi les rues sans stationnement (OSM, plus lent)", value=bool(prec.get("osm", False)),
+                    help="Ajoute en gris les rues sans place voiture recensée, via OpenStreetMap/Overpass "
+                         "(serveurs publics souvent saturés : jusqu'à 20 s d'attente). "
+                         "N'a aucun effet sur les estimations du modèle.",
+                )
+            lancer = st.form_submit_button("🔎  Rechercher", type="primary", use_container_width=True)
+        st.caption("Estimation indicative par un modèle d'IA, à partir des places recensées par la "
+                   "Ville de Paris. Ce n'est pas un comptage en direct."
+                   + (f" Modèle : {modele.version}." if modele else ""))
 
-if lancer:
-    st.session_state["derniere_recherche"] = {
-        "num": int(num_v), "type": type_v, "nom": nom_v.strip(), "rayon": int(rayon), "osm": afficher_osm,
-    }
-
-recherche = st.session_state.get("derniere_recherche")
-if not recherche or not recherche["nom"]:
-    st.info("Saisis une adresse parisienne puis clique sur « Rechercher ».")
+    if lancer:
+        if not nom_v.strip():
+            with centre:
+                st.warning("Indique le nom de la voie.")
+            st.stop()
+        st.session_state["derniere_recherche"] = {
+            "num": int(num_v), "type": type_v, "nom": nom_v.strip(), "rayon": int(rayon), "osm": afficher_osm,
+        }
+        st.session_state["ecran"] = "resultats"
+        st.rerun()
     st.stop()
+
+# ---------- Écran 3 : résultats (carte + prédictions) ----------
+recherche = st.session_state.get("derniere_recherche")
+if not recherche or not recherche.get("nom"):
+    st.session_state["ecran"] = "recherche"
+    st.rerun()
+
+st.button("←  Nouvelle recherche", on_click=aller_a, args=("recherche",))
 
 
 # ============================================================
