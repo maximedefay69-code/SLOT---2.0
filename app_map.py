@@ -130,7 +130,7 @@ def c_rues_osm(lat, lon, rayon):
 MARRON = "#603818"        # couleur du logo
 CREME = "#FBF7F2"
 DUREE_INTRO_S = 2.6
-SLOGAN = "Le Fast Food du stationnement"
+SLOGAN = "Le Jackpot du stationnement !"
 TYPES_VOIE = ["Rue", "Boulevard", "Avenue", "Place", "Quai", "Passage", "Impasse", "Allée", "Cours", "Square"]
 
 
