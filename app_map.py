@@ -279,6 +279,14 @@ div[data-testid="stFormSubmitButton"] button {{ min-height: 3rem; font-size: 1.0
 
 ecran = st.session_state.setdefault("ecran", "intro")
 
+# Mode debug : ajouter ?debug=1 à l'adresse de l'app pour voir les chiffres et les diagnostics.
+try:
+    if st.query_params.get("debug") == "1":
+        st.session_state["debug"] = True
+except Exception:
+    pass
+DEBUG = bool(st.session_state.get("debug"))
+
 
 def _pixels(rects, couleur):
     return "".join(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="{couleur}"/>' for x, y, w, h in rects)
@@ -311,7 +319,8 @@ def html_intro():
 .slot-intro .nom {{ margin-top: 16px; font-size: 2.8rem; font-weight: 800; letter-spacing: .25em;
   padding-left: .25em; color: {MARRON}; animation: slot-monte .6s .2s both; }}
 .slot-intro .slogan {{ margin-top: 4px; color: #8a7a6c; font-size: 1.05rem; animation: slot-monte .6s .35s both; }}
-.slot-intro svg.scene {{ margin-top: 26px; width: 264px; height: auto; image-rendering: pixelated; }}
+.slot-intro svg.scene {{ margin-top: 18px; width: 264px; height: auto; overflow: visible;
+  image-rendering: pixelated; }}
 .slot-intro .voiture {{ transform-box: fill-box; transform-origin: center;
   animation: slot-creneau {d}s .2s ease-in-out both; }}
 .slot-intro .place {{ opacity: 0; animation: slot-place .5s {0.2 + 0.86 * d:.2f}s both; }}
@@ -341,7 +350,7 @@ def html_intro():
   {logo_html}
   <div class="nom">SLOT</div>
   <div class="slogan">{SLOGAN}</div>
-  <svg class="scene" viewBox="0 0 240 112" shape-rendering="crispEdges" xmlns="http://www.w3.org/2000/svg">
+  <svg class="scene" viewBox="0 -22 240 134" shape-rendering="crispEdges" xmlns="http://www.w3.org/2000/svg">
     <rect x="0" y="12" width="240" height="48" fill="#cfc4b8"/>
     {tirets}
     <rect x="0" y="60" width="240" height="40" fill="#e6dcd1"/>
@@ -350,7 +359,7 @@ def html_intro():
     <g transform="translate(12 66)">{svg_voiture("#7a5a3e")}</g>
     <g transform="translate(166 66)">{svg_voiture("#8f7e6e")}</g>
     <g class="voiture">{svg_voiture(OR_JACKPOT, "#5a3d14")}</g>
-    <text class="jackpot" x="121" y="9" text-anchor="middle">JACKPOT !</text>
+    <text class="jackpot" x="120" y="-4" text-anchor="middle">JACKPOT !</text>
   </svg>
   <div class="piste"><div class="barre"></div></div>
 </div>"""
@@ -599,19 +608,28 @@ folium.TileLayer(
 COULEUR_SANS_DONNEE = "#9aa0a6"
 
 
+def pastille(couleur):
+    return f'<span class="slot-pastille" style="background:{couleur}"></span>'
+
+
+# Ce que voit l'utilisateur : une couleur et un mot, pas de chiffres de places.
+LIBELLES_COULEUR = {core.VERT: "Bonnes chances", core.ORANGE: "Ça peut passer",
+                    core.ROUGE: "Difficile", core.GRIS: "Pas d'estimation"}
+
+
+def badge(couleur):
+    return f'{pastille(couleur)}<b>{LIBELLES_COULEUR.get(couleur, LIBELLES_COULEUR[core.GRIS])}</b>'
+
+
 def info_rue(cle, nom_defaut):
     """Texte d'infobulle d'une rue (identique pour tous ses tronçons et emprises)."""
     rue, pred = rues.get(cle), predictions.get(cle)
     titre = f"<b>{rue['label'] if rue else nom_defaut}</b>" + ((" (ta rue)" if mode_geo else " (rue recherchée)") if cle == cle_principale else "")
     if pred:
-        texte = (f"{titre}<br>{pred.libres} place(s) libre(s) estimée(s) sur {rue['places']} recensée(s) "
-                 f"dans le rayon<br>Occupation estimée : {pred.occupation:.0%}")
-        if not pred.rue_connue:
-            texte += "<br><i>Rue absente de l'entraînement : estimation générique.</i>"
-        return texte
+        return f"{titre}<br>{LIBELLES_COULEUR[core.couleur_pour_prediction(pred.occupation, pred.libres)]}"
     if rue:
-        return f"{titre}<br>{rue['places']} place(s) recensée(s) — estimation indisponible"
-    return f"{titre}<br>Aucun stationnement voiture recensé dans le rayon"
+        return f"{titre}<br>Pas d'estimation"
+    return f"{titre}<br>Pas de stationnement voiture"
 
 
 def couleur_rue(cle):
@@ -667,9 +685,7 @@ for cle, rue in rues.items():
     cible = couche_detail if cle in cles_tracees else couche_seules
     info = info_rue(cle, rue["label"])
     for emprise in rue["emprises"]:
-        details = folium.Tooltip(
-            f"{info}<br><small>Emprise : {emprise['regpri'].title() or 'régime inconnu'}, "
-            f"{emprise['places'] if emprise['places'] is not None else '?'} place(s)</small>")
+        details = folium.Tooltip(info)
         for genre, coords in emprise["geometries"]:
             if genre == "polygon":
                 folium.Polygon(coords, color=couleur, weight=2, fill=True, fill_color=couleur,
@@ -719,10 +735,6 @@ for medaille, r in zip(MEDAILLES, podium):
 folium.LayerControl(collapsed=True).add_to(carte)
 
 
-def pastille(couleur):
-    return f'<span class="slot-pastille" style="background:{couleur}"></span>'
-
-
 # ---------- En-tête des résultats + carte « ta rue » ----------
 if mode_geo:
     st.markdown(f"#### 📍 Dans un rayon de {recherche['rayon']} m autour de toi")
@@ -737,13 +749,12 @@ if res_od["methode"] is None:
     couleur_principale = core.GRIS
 elif pred_principale:
     couleur_principale = core.couleur_pour_prediction(pred_principale.occupation, pred_principale.libres)
-    detail_rue = (f"{pastille(couleur_principale)}<b>{1 - pred_principale.occupation:.0%} libres</b> · "
-                  f"≈ {pred_principale.libres} place(s) libre(s) sur {rue_principale['places']}")
+    detail_rue = badge(couleur_principale)
     if podium and podium[0]["cle"] == cle_principale and not sature:
         detail_rue += "<br>✅ Tu es déjà dans la meilleure rue du coin !"
 elif rue_principale:
     couleur_principale = core.GRIS
-    detail_rue = f"{rue_principale['places']} place(s) recensée(s) — estimation indisponible."
+    detail_rue = badge(core.GRIS)
 else:
     couleur_principale = core.GRIS
     detail_rue = "Pas de stationnement voiture recensé sur cette rue. Regarde le podium plus bas 👇"
@@ -791,8 +802,7 @@ else:
         st.markdown(
             f'<div class="slot-podium" style="background:{fond};border:1px solid {bord}">'
             f'<div class="ligne1">{medaille} {r["label"]} · {a_distance}{tag}</div>'
-            f'<div class="ligne2">{pastille(r["couleur"])}<b>{r["pct_libres"]:.0%} libres</b> · '
-            f'≈ {r["libres"]} place(s) libre(s) sur {r["places"]}</div></div>',
+            f'<div class="ligne2">{badge(r["couleur"])}</div></div>',
             unsafe_allow_html=True)
         if r["point"]:
             liens = core.liens_itineraire(*r["point"])
@@ -803,12 +813,8 @@ else:
                 st.link_button("🗺️  Google Maps", liens["maps"], use_container_width=True)
 
 st.markdown(
-    f"<small>{pastille(core.VERT)}occupation < {core.SEUIL_VERT_OCCUPATION:.0%} et au moins "
-    f"{core.SEUIL_PLACES_LIBRES} places libres &nbsp; {pastille(core.ROUGE)}occupation > "
-    f"{core.SEUIL_ROUGE_OCCUPATION:.0%} et moins de {core.SEUIL_PLACES_LIBRES} places libres &nbsp; "
-    f"{pastille(core.ORANGE)}autres cas &nbsp; {pastille(core.GRIS)}estimation indisponible. "
-    "Distances à vol d'oiseau. Classement : meilleure couleur, puis le plus de places libres, "
-    "puis la plus proche.</small>",
+    f"<small>{badge(core.VERT)} &nbsp; {badge(core.ORANGE)} &nbsp; {badge(core.ROUGE)}"
+    " &nbsp;·&nbsp; distances à vol d'oiseau.</small>",
     unsafe_allow_html=True,
 )
 if nb_formes == 0 and res_od["methode"] is not None:
@@ -824,20 +830,20 @@ if trafic["score"] is None:
     c4.metric("Trafic", "Non mesuré", "fluide supposé (0)", delta_color="off")
 else:
     c4.metric("Trafic", NIVEAUX_TRAFIC[trafic["score"]], f"{trafic['ecart_s']:+d} s", delta_color="inverse")
-if err_meteo:
+if DEBUG and err_meteo:
     st.caption("⚠️ " + err_meteo)
-if trafic["score"] is None:
+if DEBUG and trafic["score"] is None:
     st.caption(
         "⚠️ Trafic non mesuré : l'estimation suppose une circulation fluide (valeur par défaut). "
         f"Raison : {trafic['erreur']}"
     )
-if pred_principale and not pred_principale.rue_connue:
+if DEBUG and pred_principale and not pred_principale.rue_connue:
     st.caption(
         f"ℹ️ {geo['rue']} ne fait pas partie des {len(modele.rues_apprises)} rues observées pendant "
         "l'entraînement : l'estimation repose sur l'heure, le jour, la météo et le nombre de places."
     )
 
-if classement:
+if DEBUG and classement:
     with st.expander(f"Toutes les rues du rayon ({len(classement)})"):
         st.dataframe(
             [{"Rang": i, "Rue": r["label"], "Distance (m)": core.arrondir_distance(r["distance"]),
@@ -849,7 +855,10 @@ if classement:
 # ============================================================
 # 7. DIAGNOSTICS
 # ============================================================
-with st.expander("Diagnostics"):
+if not DEBUG:
+    st.stop()  # détails techniques réservés au mode debug (ajouter ?debug=1 à l'adresse de l'app)
+
+with st.expander("Diagnostics", expanded=True):
     if mode_geo:
         st.write(f"**Position (géolocalisation) :** {lat}, {lon} — précision "
                  f"{recherche.get('precision') or '?'} m — adresse la plus proche : {geo['adresse']} "
