@@ -6,6 +6,7 @@ Lancer en local :  streamlit run app_map.py
 
 import base64
 import os
+import tempfile
 import time
 from datetime import datetime
 
@@ -143,9 +144,85 @@ DUREE_INTRO_S = 3.2
 SLOGAN = "Le Jackpot du stationnement !"
 TYPES_VOIE = ["Rue", "Boulevard", "Avenue", "Place", "Quai", "Passage", "Impasse", "Allée", "Cours", "Square"]
 
-# Composant de géolocalisation maison (composants/geoloc/index.html), sans dépendance.
-_composant_geoloc = components.declare_component(
-    "slot_geoloc", path=os.path.join(DOSSIER, "composants", "geoloc"))
+# Composant de géolocalisation maison, sans dépendance : son HTML est intégré ici et
+# écrit au démarrage dans un dossier temporaire (aucun fichier à ajouter sur GitHub).
+HTML_COMPOSANT_GEOLOC = """<!doctype html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="margin:0">
+<script>
+  // Composant Streamlit minimal (sans dépendance) : demande la position GPS
+  // au navigateur une seule fois, puis la renvoie à Python.
+  // Valeur renvoyée : {coords: {latitude, longitude, accuracy}, timestamp}
+  //               ou {error: {code, message}}  (1 = refus, 2 = indisponible, 3 = délai dépassé)
+
+  function envoyer(type, donnees) {
+    window.parent.postMessage(Object.assign({isStreamlitMessage: true, type: type}, donnees), "*");
+  }
+
+  var dejaDemande = false;
+
+  function demanderPosition() {
+    if (dejaDemande) return;
+    dejaDemande = true;
+    if (!navigator.geolocation) {
+      envoyer("streamlit:setComponentValue",
+              {value: {error: {code: 0, message: "geolocation non supportée"}}, dataType: "json"});
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      function (pos) {
+        envoyer("streamlit:setComponentValue", {
+          value: {
+            coords: {
+              latitude: pos.coords.latitude,
+              longitude: pos.coords.longitude,
+              accuracy: pos.coords.accuracy
+            },
+            timestamp: pos.timestamp
+          },
+          dataType: "json"
+        });
+      },
+      function (err) {
+        envoyer("streamlit:setComponentValue",
+                {value: {error: {code: err.code, message: err.message}}, dataType: "json"});
+      },
+      {enableHighAccuracy: true, timeout: 15000, maximumAge: 0}
+    );
+  }
+
+  window.addEventListener("message", function (event) {
+    if (event.data && event.data.type === "streamlit:render") demanderPosition();
+  });
+
+  window.addEventListener("load", function () {
+    envoyer("streamlit:componentReady", {apiVersion: 1});
+    envoyer("streamlit:setFrameHeight", {height: 0});
+  });
+</script>
+</body>
+</html>
+"""
+
+
+@st.cache_resource(show_spinner=False)
+def dossier_composant_geoloc():
+    dossier = os.path.join(tempfile.gettempdir(), "slot_composant_geoloc")
+    os.makedirs(dossier, exist_ok=True)
+    chemin = os.path.join(dossier, "index.html")
+    try:
+        with open(chemin, encoding="utf-8") as f:
+            a_jour = f.read() == HTML_COMPOSANT_GEOLOC
+    except OSError:
+        a_jour = False
+    if not a_jour:
+        with open(chemin, "w", encoding="utf-8") as f:
+            f.write(HTML_COMPOSANT_GEOLOC)
+    return dossier
+
+
+_composant_geoloc = components.declare_component("slot_geoloc", path=dossier_composant_geoloc())
 
 
 @st.cache_resource(show_spinner=False)
