@@ -982,9 +982,10 @@ def distance_rue(lat, lon, rue):
 
 def classer_rues(rues, predictions, lat, lon):
     """
-    Classe les rues qui ont une estimation :
-      1. meilleure couleur (vert, puis orange, puis rouge) ;
-      2. puis le plus de places libres estimées ;
+    Classe les rues qui ont une estimation, de la plus grande chance de trouver une place
+    à la plus faible :
+      1. le plus de places libres estimées ;
+      2. à égalité, le taux d'occupation prédit le plus faible ;
       3. à égalité, la plus proche (vol d'oiseau).
     """
     classement = []
@@ -1006,14 +1007,14 @@ def classer_rues(rues, predictions, lat, lon):
             "point": point,
             "rue_connue": pred.rue_connue,
         })
-    classement.sort(key=lambda r: (RANG_COULEUR.get(r["couleur"], 3), -r["libres"],
+    classement.sort(key=lambda r: (-r["libres"], r["occupation"],
                                    r["distance"] if r["distance"] is not None else float("inf")))
     return classement
 
 
 def est_sature(classement):
-    """Saturé : aucune estimation, ou même la meilleure rue est rouge."""
-    return not classement or classement[0]["couleur"] == ROUGE
+    """Saturé : aucune estimation, ou toutes les rues du rayon sont rouges."""
+    return not classement or all(r["couleur"] == ROUGE for r in classement)
 
 
 def rayon_suivant(rayon):

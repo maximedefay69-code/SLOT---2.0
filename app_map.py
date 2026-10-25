@@ -793,6 +793,7 @@ elif not podium:
             "ou modèle IA indisponible.")
 else:
     st.markdown(f"#### 🎰 Le podium à moins de {recherche['rayon']} m")
+    st.caption("Les rues où tu as le plus de chances de trouver une place, dans l'ordre.")
     for (medaille, nom_rang, fond, bord), r in zip(STYLES_PODIUM, podium):
         distance = core.arrondir_distance(r["distance"])
         a_distance = "ici" if r["cle"] == cle_principale and mode_geo else (
@@ -802,7 +803,7 @@ else:
         st.markdown(
             f'<div class="slot-podium" style="background:{fond};border:1px solid {bord}">'
             f'<div class="ligne1">{medaille} {r["label"]} · {a_distance}{tag}</div>'
-            f'<div class="ligne2">{badge(r["couleur"])}</div></div>',
+            '</div>',
             unsafe_allow_html=True)
         if r["point"]:
             liens = core.liens_itineraire(*r["point"])
