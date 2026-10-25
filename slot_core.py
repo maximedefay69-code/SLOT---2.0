@@ -215,6 +215,88 @@ def geocoder_adresse(numero, type_rue, nom_rue, session=None, timeout=10):
     return None
 
 
+API_ADRESSE_INVERSE = "https://api-adresse.data.gouv.fr/reverse/"
+
+
+def geocoder_inverse(lat, lon, session=None, timeout=10):
+    """
+    Rue la plus proche d'une position (géolocalisation du téléphone).
+    Retourne un dict au même format que geocoder_adresse, mais avec la position
+    de l'utilisateur (lat, lon) et non celle de l'adresse trouvée.
+    None si la position n'est pas dans Paris. Lève ApiError si le service est en erreur.
+    """
+    s = _session(session)
+    try:
+        r = s.get(API_ADRESSE_INVERSE, params={"lat": round(lat, 6), "lon": round(lon, 6), "limit": 5},
+                  timeout=timeout)
+    except requests.RequestException as e:
+        raise ApiError(f"API Adresse injoignable : {type(e).__name__}") from e
+    donnees = lire_json(r, "API Adresse")
+    for feature in donnees.get("features") or []:
+        props = feature.get("properties") or {}
+        citycode = str(props.get("citycode", ""))
+        if not citycode.startswith("751"):
+            continue
+        try:
+            arrdt = int(citycode[-2:])
+        except ValueError:
+            continue
+        if not 1 <= arrdt <= 20:
+            continue
+        rue = props.get("street") or props.get("name")
+        if not rue:
+            continue
+        return {
+            "lat": float(lat),
+            "lon": float(lon),
+            "arrdt": arrdt,
+            "adresse": props.get("label", rue),
+            "rue": rue,
+            "score": props.get("score"),
+            "type": props.get("type"),
+            "distance_adresse_m": props.get("distance"),
+        }
+    return None
+
+
+CODES_ERREUR_GEOLOC = {
+    0: "Ce navigateur ne permet pas la géolocalisation.",
+    1: "Tu as refusé l'accès à ta position.",
+    2: "Ta position n'a pas pu être déterminée (signal GPS insuffisant ?).",
+    3: "La localisation a pris trop de temps.",
+}
+
+
+def lire_position(valeur):
+    """
+    Interprète la valeur renvoyée par le composant de géolocalisation.
+    Retourne un dict : etat ("attente" | "ok" | "refus" | "erreur"),
+    lat, lon, precision (m), message.
+    """
+    vide = {"etat": "attente", "lat": None, "lon": None, "precision": None, "message": None}
+    if isinstance(valeur, dict) and "value" in valeur and "coords" not in valeur and "error" not in valeur:
+        valeur = valeur["value"]  # format {value, dataType} de certains composants
+    if not isinstance(valeur, dict):
+        return vide
+    if "error" in valeur:
+        err = valeur.get("error") or {}
+        code = err.get("code") if isinstance(err, dict) else None
+        message = CODES_ERREUR_GEOLOC.get(code, f"Erreur de localisation : {err}")
+        return {**vide, "etat": "refus" if code == 1 else "erreur", "message": message}
+    coords = valeur.get("coords") or {}
+    try:
+        lat, lon = float(coords["latitude"]), float(coords["longitude"])
+    except (KeyError, TypeError, ValueError):
+        return {**vide, "etat": "erreur", "message": "Position reçue illisible."}
+    if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+        return {**vide, "etat": "erreur", "message": "Position reçue invalide."}
+    try:
+        precision = float(coords.get("accuracy")) if coords.get("accuracy") is not None else None
+    except (TypeError, ValueError):
+        precision = None
+    return {"etat": "ok", "lat": lat, "lon": lon, "precision": precision, "message": None}
+
+
 # ============================================================
 # Météo
 # ============================================================
@@ -872,3 +954,84 @@ def couleur_pour_places(libres):
     if libres <= 3:
         return "#f39c12"
     return "#27ae60"
+
+
+# ============================================================
+# Podium : meilleures rues autour d'un point
+# ============================================================
+RAYONS = (300, 500, 800)           # rayon par défaut, puis élargissements proposés si « saturé »
+RANG_COULEUR = {VERT: 0, ORANGE: 1, ROUGE: 2}
+
+
+def distance_rue(lat, lon, rue):
+    """
+    Distance à vol d'oiseau (m) entre un point et le point le plus proche
+    des emprises de stationnement d'une rue. Retourne (distance, [lat, lon]) ou (None, None).
+    """
+    meilleur, point = None, None
+    for e in rue.get("emprises") or []:
+        candidats = [c for _, coords in e.get("geometries") or [] for c in coords]
+        if e.get("point"):
+            candidats.append(list(e["point"]))
+        for c in candidats:
+            d = distance_m(lat, lon, c[0], c[1])
+            if meilleur is None or d < meilleur:
+                meilleur, point = d, [float(c[0]), float(c[1])]
+    return meilleur, point
+
+
+def classer_rues(rues, predictions, lat, lon):
+    """
+    Classe les rues qui ont une estimation :
+      1. meilleure couleur (vert, puis orange, puis rouge) ;
+      2. puis le plus de places libres estimées ;
+      3. à égalité, la plus proche (vol d'oiseau).
+    """
+    classement = []
+    for cle, pred in predictions.items():
+        rue = rues.get(cle)
+        if rue is None:
+            continue
+        couleur = couleur_pour_prediction(pred.occupation, pred.libres)
+        distance, point = distance_rue(lat, lon, rue)
+        classement.append({
+            "cle": cle,
+            "label": rue["label"],
+            "couleur": couleur,
+            "libres": pred.libres,
+            "places": pred.places,
+            "occupation": pred.occupation,
+            "pct_libres": 1.0 - pred.occupation,
+            "distance": distance,
+            "point": point,
+            "rue_connue": pred.rue_connue,
+        })
+    classement.sort(key=lambda r: (RANG_COULEUR.get(r["couleur"], 3), -r["libres"],
+                                   r["distance"] if r["distance"] is not None else float("inf")))
+    return classement
+
+
+def est_sature(classement):
+    """Saturé : aucune estimation, ou même la meilleure rue est rouge."""
+    return not classement or classement[0]["couleur"] == ROUGE
+
+
+def rayon_suivant(rayon):
+    """Rayon d'élargissement proposé (500 puis 800 m), ou None si déjà au maximum."""
+    plus_grands = [r for r in RAYONS if r > rayon]
+    return plus_grands[0] if plus_grands else None
+
+
+def arrondir_distance(distance):
+    """« à 140 m » : arrondi aux 10 m (au moins 10 m)."""
+    if distance is None:
+        return None
+    return max(10, int(round(distance / 10.0)) * 10)
+
+
+def liens_itineraire(lat, lon):
+    """Liens qui ouvrent directement l'itinéraire en voiture (app si installée, sinon site)."""
+    return {
+        "waze": f"https://waze.com/ul?ll={lat:.6f},{lon:.6f}&navigate=yes",
+        "maps": f"https://www.google.com/maps/dir/?api=1&destination={lat:.6f},{lon:.6f}&travelmode=driving",
+    }

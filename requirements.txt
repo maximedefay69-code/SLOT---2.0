@@ -1,5 +1,5 @@
 # SLOT 2.0 — à utiliser avec Python 3.12 (Streamlit Cloud > Advanced settings).
-streamlit>=1.36,<2
+streamlit>=1.39,<2
 streamlit-folium>=0.22
 folium>=0.17
 requests>=2.31
